@@ -1,0 +1,3 @@
+import { createFileRoute } from '@tanstack/react-router';
+import { SettingsView } from '@/components/inspector';
+export const Route=createFileRoute('/settings')({head:()=>({meta:[{title:'Workspace Settings — Slurp'},{name:'description',content:'Configure request timeouts in Slurp.'},{property:'og:title',content:'Workspace Settings — Slurp'},{property:'og:description',content:'Manage your HTTP inspection workspace preferences.'},{property:'og:type',content:'website'},{name:'twitter:card',content:'summary_large_image'}]}),component:SettingsView});

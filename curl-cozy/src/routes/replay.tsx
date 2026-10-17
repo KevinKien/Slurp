@@ -1,0 +1,3 @@
+import { createFileRoute } from '@tanstack/react-router';
+import { ReplayView } from '@/components/inspector';
+export const Route=createFileRoute('/replay')({head:()=>({meta:[{title:'Replay — Slurp'},{name:'description',content:'Compose and replay HTTP requests with editable headers, parameters and body.'},{property:'og:title',content:'Replay — Slurp'},{property:'og:description',content:'A multi-session HTTP request replay client.'},{property:'og:type',content:'website'},{name:'twitter:card',content:'summary_large_image'}]}),component:ReplayView});

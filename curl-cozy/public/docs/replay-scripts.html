@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Replay Scripts Documentation — Slurp</title><link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/docs/theme.css">
+</head>
+<body>
+  <h1>Replay Scripts: After response</h1>
+  <p>Scripts extract data from a response and save it as variables for subsequent requests. Each Replay tab has its own script. With no authentication profile selected, variables are shared across tabs in the same workspace. With a profile selected, scripts read shared variables plus profile overrides and save updates to that profile only. See <a href="/docs/security-testing.html#profiles">Account Profiles</a> for per-account token and cookie setup.</p>
+  <h2>Quick start: save an access token</h2>
+  <ol>
+    <li>Open the login request for user A and select <strong>Scripts</strong>.</li>
+    <li>Enter the script below and click <strong>Send</strong>. Adjust <code>body.data.access_token</code> to match your API's JSON response.</li>
+  </ol>
+  <pre><code>const body = response.json();
+
+if (response.status === 200) {
+  const token = body.data?.access_token;
+  if (typeof token !== "string" || !token) {
+    throw new Error("Response does not contain an access token");
+  }
+  variables.set("token1", token);
+  console.log("Updated token1");
+}</code></pre>
+  <p>In the login tab for user B, use the same script and replace <code>token1</code> with <code>token2</code>. Open <strong>Variables</strong> to inspect the saved values.</p>
+  <p>In the <strong>Headers</strong> tab of a request that requires authentication, add:</p>
+  <pre><code>Authorization: Bearer {{token1}}</code></pre>
+  <p>Use <code>{{token2}}</code> to send as user B. The <code>{{variable_name}}</code> syntax works in URLs, headers, and request bodies. Variables are updated after the response, so their new values apply to subsequent sends.</p>
+  <h2>Available APIs</h2>
+  <div class="table"><table>
+    <thead><tr><th>API</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>response.status</code></td><td>The numeric HTTP status code, such as <code>200</code> or <code>401</code>.</td></tr>
+      <tr><td><code>response.json()</code></td><td>Parses the response body as JSON. Throws if the body is not valid JSON.</td></tr>
+      <tr><td><code>response.text()</code></td><td>Returns the response body as a string.</td></tr>
+      <tr><td><code>response.headers</code></td><td>An object containing response headers. For example, <code>response.headers["content-type"]</code>. See the example below for a case-insensitive header lookup.</td></tr>
+      <tr><td><code>variables.get("token1")</code></td><td>Returns the string value, or <code>undefined</code> if the variable does not exist. Also reads changes made earlier in the same script.</td></tr>
+      <tr><td><code>variables.set("token1", value)</code></td><td>Sets a variable. Both the name and value must be strings. Use <code>String(value)</code> for numbers or <code>JSON.stringify(value)</code> for objects.</td></tr>
+      <tr><td><code>console.log/info/warn/error(...args)</code></td><td>Writes logs shown under <strong>After response</strong>. <code>log(...args)</code> is an alias for <code>console.log</code>.</td></tr>
+    </tbody>
+  </table></div>
+  <h2>More examples</h2>
+  <p>Save a numeric ID and an object from a JSON response:</p>
+  <pre><code>const body = response.json();
+variables.set("user_id", String(body.user.id));
+variables.set("user", JSON.stringify(body.user));</code></pre>
+  <p>Read a response header regardless of its capitalization:</p>
+  <pre><code>const entry = Object.entries(response.headers)
+  .find(([name]) =&gt; name.toLowerCase() === "x-request-id");
+if (entry) variables.set("request_id", entry[1]);</code></pre>
+  <h2>Execution, logs, and errors</h2>
+  <ul>
+    <li>Scripts run after clicking <strong>Send in the web UI</strong> and receiving a response, including HTTP 4xx/5xx responses. If a request fails without a response, the script is skipped. Sending through MCP does not currently execute scripts.</li>
+    <li>Variable changes are applied only when the entire script succeeds. If it throws or exceeds a limit, existing variables are preserved. The HTTP response remains available to inspect.</li>
+    <li>Expand <strong>After response</strong> in the response pane to view logs, errors, and the names of updated variables. Avoid logging tokens, since logs are stored in send history.</li>
+    <li><strong>Send history</strong> stores the script and its result for each send. Viewing history or restoring a request does not execute the script again.</li>
+    <li>Scripts are saved with their tabs when a workspace is selected. Without a workspace, data stays in the current session and is lost on reload.</li>
+  </ul>
+  <h2>Limits</h2>
+  <ul>
+    <li>Only synchronous JavaScript is supported. Do not use <code>async/await</code>, promises, timers, <code>fetch</code>, DOM APIs, Node.js APIs, or library imports.</li>
+    <li>Scripts are limited to 32,000 characters, approximately 300 ms of execution time, and 16 MiB of memory. The worker is terminated if it does not finish within 3 seconds.</li>
+    <li>Up to 100 variables are supported, with a maximum of 64,000 bytes per value. Names must start with a letter or <code>_</code>, followed by letters, digits, <code>_</code>, <code>.</code>, or <code>-</code>, with a maximum length of 100 characters.</li>
+    <li>Up to 100 log entries are supported, with each entry truncated to 2,000 characters. Logs produced before a script error are not currently retained.</li>
+  </ul>
+</body>
+</html>

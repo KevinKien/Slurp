@@ -1,0 +1,3 @@
+import { createFileRoute } from '@tanstack/react-router';
+import { ScopeView } from '@/components/inspector';
+export const Route=createFileRoute('/scope')({head:()=>({meta:[{title:'Scope & Filters — Slurp'},{name:'description',content:'Set target scope and focus your HTTP traffic inspection.'},{property:'og:title',content:'Scope & Filters — Slurp'},{property:'og:description',content:'Manage the hosts included in your inspection workspace.'},{property:'og:type',content:'website'},{name:'twitter:card',content:'summary_large_image'}]}),component:ScopeView});
