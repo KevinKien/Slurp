@@ -29,6 +29,7 @@ Planned development builds on the current inspection and scan capabilities:
 - **Specialized vulnerability scanning:** add dedicated scan workflows for individual vulnerability classes, with deeper configuration and validation.
 - **Template-based scanning:** support reusable scan templates for defining requests, payloads, matchers and verification steps.
 - **Burp project import:** add support for importing `.burp` project files into Slurp.
+- **Workspace export/import:** export and import workspaces as `.slurp` files.
 - **Analysis plugins:** develop a plugin system for extending Slurp, including JavaScript analysis and endpoint discovery.
 - **Parameter discovery:** discover and test additional query, body and header parameters.
 - **GraphQL integration:** add GraphQL-aware inspection, request editing, schema exploration and security testing.
