@@ -6,6 +6,8 @@ Slurp is a traffic inspection and API security testing tool built with a Rust pr
 
 The standalone executable serves both the web UI and API. No Node.js runtime is required to run a packaged release.
 
+![Slurp HTTP History showing captured traffic and request/response inspection](docs/images/slurp-http-history.png)
+
 ## Features
 
 - **HTTP History:** search and filter captured requests, browse large histories with incremental loading and virtual scrolling, bookmark requests, add notes, delete entries, and export JSON or HAR.
