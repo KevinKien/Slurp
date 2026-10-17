@@ -1,3 +1,4 @@
+import { authorizedFetch } from '@/lib/api-auth';
 /// API client for the Rust proxy backend.
 
 const sameOrigin = import.meta.env["VITE_SLURP_SAME_ORIGIN"] === "true";
@@ -153,7 +154,7 @@ export interface ProxyInfo {
 }
 
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
+  const res = await authorizedFetch(`${API_BASE}${path}`, {
     ...init,
     headers: { "Content-Type": "application/json", ...init?.headers },
   });
@@ -311,7 +312,7 @@ export async function updateScope(scope: ScopeSettings): Promise<ScopeSettings> 
 
 export interface ProxyListenerSettings { host: string; port: number }
 export async function proxyListenerSettings(settings?: ProxyListenerSettings): Promise<ProxyListenerSettings> {
-  const response = await fetch(`${API_BASE}/api/settings/proxy`, settings === undefined ? {} : {
+  const response = await authorizedFetch(`${API_BASE}/api/settings/proxy`, settings === undefined ? {} : {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings),
   });
   if (!response.ok) {

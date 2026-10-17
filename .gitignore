@@ -19,6 +19,8 @@ test-results/
 
 # Local configuration and secrets (keep example templates)
 /dev.sh
+/SECURITY_REVIEW.md
+/RELEASE.md
 /.local-git-backups/
 .env
 .env.*
@@ -60,3 +62,6 @@ Desktop.ini
 !.vscode/extensions.json
 *.swp
 *.swo
+
+# Local management credential
+api-token

@@ -20,7 +20,9 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use tokio::sync::{Semaphore, OwnedSemaphorePermit};
+use std::{pin::Pin, task::{Context as TaskContext, Poll}};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
@@ -31,9 +33,11 @@ use tracing::{debug, error, info};
 pub struct ProxyConfig {
     /// Address to bind the proxy to
     pub listen_addr: SocketAddr,
-    /// Maximum body size to capture (bytes). Bodies are always forwarded in full;
-    /// storage truncates what it records.
+    /// Maximum buffered request or response body (bytes), capped at 10 MiB.
+    /// Oversized requests are rejected; oversized upstream responses return 502.
     pub max_body_size: usize,
+    /// Local management API listener, protected from proxy forwarding.
+    pub management_addr: Option<SocketAddr>,
 }
 
 impl Default for ProxyConfig {
@@ -41,6 +45,7 @@ impl Default for ProxyConfig {
         Self {
             listen_addr: "127.0.0.1:8888".parse().unwrap(),
             max_body_size: 10 * 1024 * 1024, // 10 MB
+            management_addr: None,
         }
     }
 }
@@ -51,6 +56,10 @@ struct Shared {
     storage: Arc<TrafficStorage>,
     intercept: Arc<Intercept>,
     upstream_tls: Arc<rustls::ClientConfig>,
+    connections: Arc<Semaphore>,
+    requests: Arc<Semaphore>,
+    body_limit: usize,
+    management_port: Option<u16>,
 }
 
 /// The main proxy server.
@@ -68,9 +77,9 @@ impl ProxyServer {
         intercept: Arc<Intercept>,
     ) -> Self {
         Self {
-            config,
+            config: config.clone(),
             ca,
-            shared: Shared { storage, intercept, upstream_tls: client_tls_config() },
+            shared: Shared { storage, intercept, upstream_tls: client_tls_config(), connections:Arc::new(Semaphore::new(64)),requests:Arc::new(Semaphore::new(8)),body_limit:config.max_body_size.min(10*1024*1024),management_port:config.management_addr.map(|a|a.port()) },
         }
     }
 
@@ -123,14 +132,28 @@ impl ProxyServer {
     }
 }
 
+// The permit travels with the socket through CONNECT and WebSocket upgrades.
+struct ClientStream { stream:TcpStream, _permit:OwnedSemaphorePermit }
+impl AsyncRead for ClientStream {
+    fn poll_read(mut self:Pin<&mut Self>,cx:&mut TaskContext<'_>,buf:&mut tokio::io::ReadBuf<'_>)->Poll<std::io::Result<()>> {Pin::new(&mut self.stream).poll_read(cx,buf)}
+}
+impl AsyncWrite for ClientStream {
+    fn poll_write(mut self:Pin<&mut Self>,cx:&mut TaskContext<'_>,buf:&[u8])->Poll<std::io::Result<usize>> {Pin::new(&mut self.stream).poll_write(cx,buf)}
+    fn poll_flush(mut self:Pin<&mut Self>,cx:&mut TaskContext<'_>)->Poll<std::io::Result<()>> {Pin::new(&mut self.stream).poll_flush(cx)}
+    fn poll_shutdown(mut self:Pin<&mut Self>,cx:&mut TaskContext<'_>)->Poll<std::io::Result<()>> {Pin::new(&mut self.stream).poll_shutdown(cx)}
+}
+
 /// Handle a single client connection.
 ///
 /// We use hyper's HTTP/1.1 server to parse the incoming request.
 /// If it's CONNECT, we do MITM. Otherwise, we forward as HTTP.
 async fn handle_client(stream: TcpStream, ca: Arc<CertificateAuthority>, shared: Shared) -> Result<()> {
-    let io = TokioIo::new(stream);
+    let permit=shared.connections.clone().try_acquire_owned().map_err(|_|anyhow::anyhow!("Proxy connection capacity reached"))?;
+    let io = TokioIo::new(ClientStream{stream,_permit:permit});
 
     http1::Builder::new()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(Duration::from_secs(10))
         .preserve_header_case(true)
         .title_case_headers(true)
         .serve_connection(
@@ -232,9 +255,8 @@ where
     let tls_acceptor = TlsAcceptor::from(server_config);
 
     // 2. Do TLS handshake with the client (we are the "server")
-    let client_tls = tls_acceptor
-        .accept(client_io)
-        .await
+    let client_tls = tokio::time::timeout(Duration::from_secs(10),tls_acceptor.accept(client_io))
+        .await.context("Client TLS handshake timed out")?
         .with_context(|| format!("TLS handshake failed with client for {}", host))?;
 
     let client_io = TokioIo::new(client_tls);
@@ -243,6 +265,8 @@ where
     let host = host.to_string();
 
     http1::Builder::new()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(Duration::from_secs(10))
         .preserve_header_case(true)
         .title_case_headers(true)
         .serve_connection(
@@ -311,6 +335,7 @@ async fn proxy_request(
     path_and_query: String,
     shared: &Shared,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
+    let _permit=match shared.requests.clone().try_acquire_owned(){Ok(permit)=>permit,Err(_)=>return Ok(error_response(503,"Proxy request capacity reached; existing held requests are preserved"))};
     let start = Instant::now();
 
     let websocket = req.method() == Method::GET
@@ -319,9 +344,9 @@ async fn proxy_request(
     let client_upgrade = websocket.then(|| hyper::upgrade::on(&mut req));
     let method = req.method().to_string();
     let headers = headers_to_pairs(req.headers());
-    let body = match read_body(req.into_body()).await {
+    let body = match read_body(req.into_body(),shared.body_limit).await {
         Ok(b) => b,
-        Err(_) => return Ok(error_response(502, "Failed to read request body")),
+        Err(error) => return Ok(error_response(413, &error.to_string())),
     };
 
     // ── Request interception ──
@@ -358,7 +383,7 @@ async fn proxy_request(
         upstream_req.headers_mut().insert("connection", HeaderValue::from_static("Upgrade"));
         upstream_req.headers_mut().insert("upgrade", HeaderValue::from_static("websocket"));
     }
-    let mut upstream_res = match send_upstream(&target, upstream_req, shared.upstream_tls.clone()).await {
+    let mut upstream_res = match tokio::time::timeout(Duration::from_secs(30),send_upstream(&target, upstream_req, shared.upstream_tls.clone(),shared.management_port)).await.unwrap_or_else(|_|Err("Upstream request timed out".into())) {
         Ok(r) => r,
         Err(e) => {
             record(shared, &target, &request, None, Some(e.clone()), start);
@@ -395,7 +420,10 @@ async fn proxy_request(
     }
     let (head, res_body) = upstream_res.into_parts();
     let upstream_status = head.status.as_u16();
-    let res_body = read_body(res_body).await.unwrap_or_default();
+    let res_body = match read_body(res_body,shared.body_limit).await {
+        Ok(body)=>body,
+        Err(error)=>{record(shared,&target,&request,None,Some(error.to_string()),start);return Ok(error_response(502,&error.to_string()));}
+    };
     let response = ResponseParts {
         status: upstream_status,
         headers: headers_to_pairs(&head.headers),
@@ -458,11 +486,14 @@ fn record(
 }
 
 /// Connect to the destination (with TLS for https) and send one request.
-async fn send_upstream(target: &Target, req: Request<Full<Bytes>>, tls_config: Arc<rustls::ClientConfig>) -> Result<Response<Incoming>, String> {
-    let addr = format!("{}:{}", target.host, target.port);
-    let tcp = TcpStream::connect(&addr)
-        .await
-        .map_err(|e| format!("Connection failed: {e}"))?;
+async fn send_upstream(target: &Target, req: Request<Full<Bytes>>, tls_config: Arc<rustls::ClientConfig>, management_port:Option<u16>) -> Result<Response<Incoming>, String> {
+    let addresses:Vec<_>=tokio::net::lookup_host((target.host.trim_matches(['[',']']),target.port)).await.map_err(|e|format!("DNS lookup failed: {e}"))?.collect();
+    if management_port==Some(target.port) {
+        let local:Vec<_>=if_addrs::get_if_addrs().map_err(|e|format!("Cannot validate management destination: {e}"))?.into_iter().map(|i|i.ip().to_canonical()).collect();
+        if addresses.iter().any(|a|a.ip().to_canonical().is_loopback()||local.contains(&a.ip().to_canonical())) {return Err("Proxy forwarding to Slurp management API is forbidden".into());}
+    }
+    // Connect to the exact addresses checked above; do not perform another DNS lookup.
+    let tcp=TcpStream::connect(addresses.as_slice()).await.map_err(|e|format!("Connection failed: {e}"))?;
 
     if target.https {
         let server_name = rustls::pki_types::ServerName::try_from(target.host.clone())
@@ -582,14 +613,19 @@ fn build_client_response(parts: ResponseParts) -> Response<Full<Bytes>> {
 
 // ── Utility functions ──────────────────────────────────────────────
 
-/// Read a hyper body into bytes. The whole body is kept so it can be forwarded intact;
-/// only what gets stored in history is truncated (by storage).
-async fn read_body(body: Incoming) -> Result<Vec<u8>> {
-    let collected = body
-        .collect()
-        .await
-        .map_err(|e| anyhow::anyhow!("Body read error: {}", e))?;
-    Ok(collected.to_bytes().to_vec())
+/// Bound body buffering and read time before interception or history copies are made.
+async fn read_body(mut body: Incoming, limit:usize) -> Result<Vec<u8>> {
+    tokio::time::timeout(Duration::from_secs(30),async {
+        let mut bytes=Vec::new();
+        while let Some(frame)=body.frame().await {
+            let frame=frame?;
+            if let Ok(data)=frame.into_data() {
+                anyhow::ensure!(data.len()<=limit.saturating_sub(bytes.len()),"Proxy body exceeds {} byte buffering limit",limit);
+                bytes.extend_from_slice(&data);
+            }
+        }
+        Ok(bytes)
+    }).await.context("Proxy body read timed out")?
 }
 
 /// Headers as ordered (name, value) pairs, keeping repeated headers separate.
@@ -642,7 +678,7 @@ mod websocket_tests {
     async fn exchange(scheme: &str, capture: bool) {
         tokio::time::timeout(std::time::Duration::from_secs(10),async {
             let storage=TrafficStorage::new(":memory:",1024).unwrap();
-            let shared=Shared{storage:storage.clone(),intercept:Intercept::new(storage.clone()),upstream_tls:client_tls_config()};
+            let shared=Shared{storage:storage.clone(),intercept:Intercept::new(storage.clone()),upstream_tls:client_tls_config(),connections:Arc::new(Semaphore::new(64)),requests:Arc::new(Semaphore::new(8)),body_limit:10*1024*1024,management_port:None};
             if !capture {shared.intercept.update_scope(crate::ScopeSettings{enabled:true,domains:vec!["other.example.com".into()]}).unwrap();}
             let upstream=TcpListener::bind("127.0.0.1:0").await.unwrap();let target=upstream.local_addr().unwrap();
             let server=tokio::spawn(async move {let (stream,_)=upstream.accept().await.unwrap();let mut ws=tokio_tungstenite::accept_async(stream).await.unwrap();let msg=ws.next().await.unwrap().unwrap();assert_eq!(msg.to_text().unwrap(),"hello");ws.send(tokio_tungstenite::tungstenite::Message::Text("world".into())).await.unwrap();ws.close(None).await.unwrap();});
@@ -680,7 +716,7 @@ mod wss_tests {
             for cert in rustls_pemfile::certs(&mut std::io::Cursor::new(ca.ca_cert_pem())) {roots.add(cert.unwrap()).unwrap();}
             let config=Arc::new(rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth());
             let storage=TrafficStorage::new(":memory:",1024).unwrap();
-            let shared=Shared{storage:storage.clone(),intercept:Intercept::new(storage.clone()),upstream_tls:config.clone()};
+            let shared=Shared{storage:storage.clone(),intercept:Intercept::new(storage.clone()),upstream_tls:config.clone(),connections:Arc::new(Semaphore::new(64)),requests:Arc::new(Semaphore::new(8)),body_limit:10*1024*1024,management_port:None};
             let upstream=TcpListener::bind("127.0.0.1:0").await.unwrap();let port=upstream.local_addr().unwrap().port();
             let tls_server=ca.get_server_config("localhost").unwrap();
             let server=tokio::spawn(async move {let (stream,_)=upstream.accept().await.unwrap();let tls=TlsAcceptor::from(tls_server).accept(stream).await.unwrap();let mut ws=tokio_tungstenite::accept_async(tls).await.unwrap();let msg=ws.next().await.unwrap().unwrap();assert_eq!(msg.to_text().unwrap(),"secure hello");ws.send(tokio_tungstenite::tungstenite::Message::Text("secure world".into())).await.unwrap();ws.close(None).await.unwrap();});
@@ -695,5 +731,36 @@ mod wss_tests {
             let connections=storage.websocket_connections(Some(crate::TEMP_WORKSPACE_ID),None,100).unwrap();assert_eq!(connections.len(),1);assert!(connections[0].url.starts_with("wss://localhost:"));
             let frames=storage.websocket_frames(Some(crate::TEMP_WORKSPACE_ID),&connections[0].id,0,100).unwrap();assert!(frames.iter().any(|f|f.text.as_deref()==Some("secure world")));
         }).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt,AsyncWriteExt};
+    async fn request(body_limit:usize,management_port:Option<u16>,target:SocketAddr,body:&[u8],capacity:usize)->String {
+        let storage=TrafficStorage::new(":memory:",1024).unwrap();
+        let shared=Shared{intercept:Intercept::new(storage.clone()),storage,upstream_tls:client_tls_config(),connections:Arc::new(Semaphore::new(2)),requests:Arc::new(Semaphore::new(capacity)),body_limit,management_port};
+        let directory=tempfile::tempdir().unwrap();let ca=Arc::new(CertificateAuthority::load_or_create(directory.path()).unwrap());
+        let listener=TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
+        let task=tokio::spawn(async move{let (stream,_)=listener.accept().await.unwrap();let _=handle_client(stream,ca,shared).await;});
+        let mut client=TcpStream::connect(address).await.unwrap();
+        client.write_all(format!("POST http://{target}/test HTTP/1.1\r\nHost: {target}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).as_bytes()).await.unwrap();client.write_all(body).await.unwrap();
+        let mut bytes=Vec::new();tokio::time::timeout(Duration::from_secs(5),client.read_to_end(&mut bytes)).await.unwrap().unwrap();task.await.unwrap();String::from_utf8(bytes).unwrap()
+    }
+    #[tokio::test] async fn rejects_oversized_request_before_forwarding() {
+        let listener=TcpListener::bind("127.0.0.1:0").await.unwrap();let response=request(32,None,listener.local_addr().unwrap(),&[b'x';33],8).await;assert!(response.starts_with("HTTP/1.1 413"),"{response}");
+        assert!(tokio::time::timeout(Duration::from_millis(50),listener.accept()).await.is_err());
+    }
+    #[tokio::test] async fn rejects_management_destination_before_connecting() {
+        let listener=TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();let response=request(64,Some(address.port()),address,b"",8).await;assert!(response.contains("management API is forbidden"),"{response}");assert!(tokio::time::timeout(Duration::from_millis(50),listener.accept()).await.is_err());
+    }
+    #[tokio::test] async fn rejects_new_requests_when_buffer_capacity_is_full() {
+        let response=request(64,None,"127.0.0.1:1".parse().unwrap(),b"",0).await;assert!(response.starts_with("HTTP/1.1 503"),"{response}");
+    }
+    #[tokio::test] async fn rejects_oversized_upstream_response() {
+        let listener=TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
+        let task=tokio::spawn(async move{let (mut stream,_)=listener.accept().await.unwrap();let mut bytes=[0u8;4096];stream.read(&mut bytes).await.unwrap();stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 33\r\nConnection: close\r\n\r\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx").await.unwrap();});
+        let response=request(32,None,address,b"",8).await;assert!(response.starts_with("HTTP/1.1 502"),"{response}");assert!(response.contains("buffering limit"));task.await.unwrap();
     }
 }

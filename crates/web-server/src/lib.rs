@@ -1,5 +1,6 @@
 /// Web server providing REST API and WebSocket for the curl-cozy frontend.
 pub mod api;
+pub mod access;
 pub mod certificate;
 pub mod intruder;
 pub mod scan;
@@ -33,12 +34,14 @@ use tracing::info;
 /// Browsers may only reach it from pages served on this machine (see `origin`).
 pub async fn start(addr: SocketAddr, storage: Arc<TrafficStorage>, intercept: Arc<Intercept>, proxy_control: proxy_core::ProxyControl, certificate: certificate::PublicCaCertificate) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    serve(listener, storage, intercept, proxy_control, certificate).await
+    let home=std::env::var_os(if cfg!(windows){"USERPROFILE"}else{"HOME"}).ok_or_else(||anyhow::anyhow!("Home directory not set"))?;
+    let access=access::ApiAccess::load(&std::path::PathBuf::from(home).join(".slurp"))?;
+    serve(listener, storage, intercept, proxy_control, certificate, access).await
 }
 
 /// Serve an already-bound listener so the CLI can fail before reporting readiness.
-pub async fn serve(listener: tokio::net::TcpListener, storage: Arc<TrafficStorage>, intercept: Arc<Intercept>, proxy_control: proxy_core::ProxyControl, certificate: certificate::PublicCaCertificate) -> Result<()> {
-    let origins = origin::AllowedOrigins::from_env();
+pub async fn serve(listener: tokio::net::TcpListener, storage: Arc<TrafficStorage>, intercept: Arc<Intercept>, proxy_control: proxy_core::ProxyControl, certificate: certificate::PublicCaCertificate, access: access::ApiAccess) -> Result<()> {
+    let origins = origin::AllowedOrigins::from_env(listener.local_addr()?);
     let cors = CorsLayer::new()
         .allow_origin(origins.cors_predicate())
         .allow_methods(Any)
@@ -103,6 +106,8 @@ pub async fn serve(listener: tokio::net::TcpListener, storage: Arc<TrafficStorag
         .route("/api/intercept/:id/drop", post(api::drop_held))
         // WebSocket
         .route("/api/ws", get(ws::ws_handler))
+        .fallback(ui::serve)
+        .layer(axum::middleware::from_fn_with_state(access, access::guard))
         // Replay saves carry whole response bodies (up to 2 MB, more once JSON-escaped)
         .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024))
         // CORS (headers for allowed origins), then the guard that rejects the rest
@@ -112,8 +117,7 @@ pub async fn serve(listener: tokio::net::TcpListener, storage: Arc<TrafficStorag
         .layer(Extension(intercept))
         .layer(Extension(proxy_control))
         .layer(Extension(certificate))
-        .with_state(storage)
-        .fallback(ui::serve);
+        .with_state(storage);
 
     info!("🌐 Web server listening on http://{}", listener.local_addr()?);
 

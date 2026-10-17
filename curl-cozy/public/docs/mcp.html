@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MCP client setup — Slurp</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/docs/theme.css">
+</head>
+<body>
+  <nav aria-label="Documentation"><a href="/docs">← All documentation</a></nav>
+  <header>
+    <h1>Connect an AI client to Slurp</h1>
+    <p>Set up Claude Code, Claude Desktop, Codex, DeepSeek Harness, OpenCode or Google Antigravity to search captured traffic and work with Replay requests.</p>
+  </header>
+  <nav aria-label="On this page">
+    <a href="#prerequisites">Before you start</a> · <a href="#claude">Claude</a> · <a href="#codex">Codex</a> · <a href="#deepseek">DeepSeek Harness</a> · <a href="#opencode">OpenCode</a> · <a href="#antigravity">Antigravity</a> · <a href="#authentication">Authentication</a> · <a href="#troubleshooting">Troubleshooting</a>
+  </nav>
+
+  <section id="prerequisites">
+    <h2>Before you start</h2>
+    <ol>
+      <li>Install the latest Slurp binary for your OS and CPU. Add its directory to the PATH used by your AI client, or replace <code>slurp</code> in the examples with the actual absolute executable path. Use <code>slurp.exe</code> on Windows.</li>
+      <li>Start Slurp in a separate terminal with <code>slurp</code>, or open Slurp.app on macOS. Keep it running. The default API address is <code>http://127.0.0.1:5174</code>.</li>
+      <li>Open the startup URL to access the UI, select a workspace or temporary session, and capture some requests.</li>
+      <li>Configure your AI client below, then restart or reload its MCP connections.</li>
+    </ol>
+    <p>The connection is <strong>AI client → local <code>slurp mcp</code> process over stdio → running Slurp REST API</strong>. The client starts the MCP process for you. Starting <code>slurp mcp</code> does not start the proxy backend.</p>
+    <p><strong>Choose a local/stdio MCP server.</strong> Slurp does not expose a Streamable HTTP or SSE MCP endpoint. Do not enter <code>http://127.0.0.1:5174</code>, <code>/api/ws</code> or the browser startup URL as a remote MCP server URL. Port <code>8888</code> is the interception proxy, not the API.</p>
+    <p>For JSON configuration, use an executable path without shell quote characters inside the value. Windows paths require escaped backslashes, for example <code>"C:\\Tools\\Slurp\\slurp.exe"</code>. A GUI client may have a different PATH from your terminal; an absolute executable path avoids that difference. Merge examples into existing configuration instead of replacing unrelated servers.</p>
+  </section>
+
+  <section id="claude">
+    <h2>Claude Code</h2>
+    <p>Add the stdio server from your terminal:</p>
+    <pre><code>claude mcp add --transport stdio slurp -- slurp mcp
+claude mcp list</code></pre>
+    <p>The default scope is local to the current project. Add <code>--scope user</code> before the server name if you want it available across projects:</p>
+    <pre><code>claude mcp add --transport stdio --scope user slurp -- slurp mcp</code></pre>
+    <p>Open Claude Code and use <code>/mcp</code> to inspect the server status and approve it if prompted. If a server named <code>slurp</code> already exists, update its executable path or remove that entry before adding a replacement.</p>
+    <h3>Claude Desktop</h3>
+    <p>Open the desktop application's developer settings and edit its MCP configuration. Add this entry to its <code>mcpServers</code> object, then restart the application:</p>
+    <pre><code class="language-json">{
+  "mcpServers": {
+    "slurp": {
+      "command": "slurp",
+      "args": ["mcp"]
+    }
+  }
+}</code></pre>
+    <p>Use a local desktop configuration. A hosted web connector that only accepts remote MCP URLs cannot launch Slurp's stdio process.</p>
+    <p>Reference: <a href="https://code.claude.com/docs/en/mcp" target="_blank" rel="noopener noreferrer">Claude Code MCP documentation</a>.</p>
+  </section>
+
+  <section id="codex">
+    <h2>Codex</h2>
+    <p>Register the server with the Codex CLI:</p>
+    <pre><code>codex mcp add slurp -- slurp mcp
+codex mcp list</code></pre>
+    <p>Alternatively, merge this table into <code>~/.codex/config.toml</code>. A trusted project can use <code>.codex/config.toml</code>:</p>
+    <pre><code class="language-toml">[mcp_servers.slurp]
+command = "slurp"
+args = ["mcp"]</code></pre>
+    <p>Restart or reload Codex's MCP connections after changing configuration. In the Codex terminal UI, use <code>/mcp</code> to check the server. Slurp does not use MCP OAuth; <code>codex mcp login slurp</code> is not needed for this stdio connection.</p>
+    <p>Reference: <a href="https://developers.openai.com/codex/mcp/" target="_blank" rel="noopener noreferrer">Official OpenAI documentation for Codex MCP</a>.</p>
+  </section>
+
+  <section id="deepseek">
+    <h2>DeepSeek Harness (DSH)</h2>
+    <p>DeepSeek Harness uses Cordis plugin configuration. Create a file named <code>slurp.cordis.yml</code> with this overlay:</p>
+    <pre><code class="language-yaml">- insert:
+    - id: mcp-slurp
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: slurp
+        transport: stdio
+        command: slurp
+        args: [mcp]</code></pre>
+    <p>From the directory containing that file, start DSH with the overlay:</p>
+    <pre><code>dsh web --patch ./slurp.cordis.yml</code></pre>
+    <p>For a persistent setup, merge the insert patch into <code>$DSH_HOME/cordis.patch.yml</code> or the appropriate profile's <code>cordis.patch.yml</code>. Keep the server name and plugin ID unique in that scope. Tools appear with names such as <code>mcp__slurp__search_history</code>.</p>
+    <p>DSH scrubs credential-like environment variables before starting stdio children. Local Slurp token-file discovery still works when the child uses the same home directory. If you rely on an environment token, explicitly forward it in the entry's <code>config.env</code>:</p>
+    <pre><code class="language-yaml">        env:
+          SLURP_API_TOKEN: !!js process.env.SLURP_API_TOKEN</code></pre>
+    <p>References: <a href="https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/mcp/mcp-client/README.md" target="_blank" rel="noopener noreferrer">DeepSeek Harness MCP client</a> and <a href="https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/guide/mcp-memory.md" target="_blank" rel="noopener noreferrer">DSH overlay setup examples</a>.</p>
+  </section>
+
+  <section id="opencode">
+    <h2>OpenCode</h2>
+    <p>Merge this local MCP entry into the project's <code>opencode.json</code> or <code>opencode.jsonc</code>:</p>
+    <pre><code class="language-json">{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "slurp": {
+      "type": "local",
+      "command": ["slurp", "mcp"],
+      "enabled": true
+    }
+  }
+}</code></pre>
+    <p>Restart OpenCode after saving and check its MCP server status. The command is an array: executable first, followed by each argument. Do not use the <code>mcpServers</code> shape from Claude Desktop here. Optional child-process environment variables belong in this entry's <code>environment</code> object.</p>
+    <p>Reference: <a href="https://opencode.ai/docs/mcp-servers/" target="_blank" rel="noopener noreferrer">OpenCode MCP servers documentation</a>.</p>
+  </section>
+
+  <section id="antigravity">
+    <h2>Google Antigravity</h2>
+    <p>In the editor's agent side panel, open <strong>… → MCP Servers → Manage MCP Servers → View raw config</strong>. Merge this stdio entry into the configuration the editor opens:</p>
+    <pre><code class="language-json">{
+  "mcpServers": {
+    "slurp": {
+      "command": "slurp",
+      "args": ["mcp"]
+    }
+  }
+}</code></pre>
+    <p>Save, refresh MCP servers, and enable Slurp. Use the file opened by your installed version; current documentation describes <code>~/.gemini/config/mcp_config.json</code> for global configuration and <code>.agents/mcp_config.json</code> for workspace configuration. The Antigravity CLI also provides a <code>/mcp</code> manager. Use <code>command</code> and <code>args</code> for Slurp rather than a remote <code>serverUrl</code>.</p>
+    <p>Reference: <a href="https://antigravity.google/docs/mcp" target="_blank" rel="noopener noreferrer">Antigravity MCP documentation</a>.</p>
+  </section>
+
+  <section id="authentication">
+    <h2>Authentication and a different API port</h2>
+    <p>Every MCP API call requires the management token. When the MCP process and backend run as the same OS user on the same machine, Slurp reads it automatically from <code>~/.slurp/api-token</code> on macOS/Linux or <code>%USERPROFILE%\.slurp\api-token</code> on Windows. No token needs to be pasted into the client configuration. Start the backend first so the file exists.</p>
+    <p><code>SLURP_API_TOKEN</code>, when supplied to the MCP child process, takes precedence over the token file. Use the backend's raw 64-character token, without <code>Bearer </code> or the startup URL. Restart the MCP process after changing its token or environment. The AI provider's API key is a separate credential.</p>
+    <p>For a non-default API address, keep stdio and change the child-process arguments. For example:</p>
+    <pre><code>slurp mcp --api http://127.0.0.1:15174</code></pre>
+    <p>In clients with a separate args field, use:</p>
+    <pre><code class="language-json">["mcp", "--api", "http://127.0.0.1:15174"]</code></pre>
+    <p>In OpenCode's command array, use <code>["slurp", "mcp", "--api", "http://127.0.0.1:15174"]</code>. The API address must match Slurp's UI/API listener, not its proxy listener. Without <code>--api</code>, the CLI also honors <code>SLURP_API_ADDR</code>.</p>
+    <p>For a backend on another machine, prefer an SSH tunnel to its loopback API, forward a local port such as <code>15174</code>, and give the local MCP process that backend's token through <code>SLURP_API_TOKEN</code>. Do not send the token over an unencrypted network connection. Keep tokens out of prompts and version-controlled project files.</p>
+  </section>
+
+  <section id="verify">
+    <h2>Verify the connection</h2>
+    <p>Ask the assistant to use Slurp's <code>list_workspaces</code>, then <code>get_stats</code> or <code>search_history</code>. For traffic captured without a saved workspace, pass <code>workspace: "temporary"</code>; temporary traffic is lost when Slurp stops.</p>
+    <pre><code>Use Slurp to list workspaces. Then search the temporary history for failed requests and summarize the results without sending any requests.</code></pre>
+    <p>Slurp also exposes <code>get_traffic</code>, <code>list_traffic</code>, <code>list_replay</code>, <code>create_replay</code>, <code>edit_replay</code>, <code>rename_replay</code>, <code>send_replay</code> and <code>clear_traffic</code>. Captured credentials and bodies become accessible to the connected assistant. <code>send_replay</code> sends a real HTTP request; <code>clear_traffic</code> deletes captured history. Use the client's tool approval controls accordingly.</p>
+  </section>
+
+  <section id="troubleshooting">
+    <h2>Troubleshooting</h2>
+    <div class="table"><table>
+      <thead><tr><th>Symptom</th><th>What to check</th></tr></thead>
+      <tbody>
+        <tr><td>Executable not found / ENOENT</td><td>Check the client's PATH or use the actual absolute path to the latest Slurp executable. A shell <code>cd</code> does not change a GUI client's PATH. On Windows, use <code>slurp.exe</code> and valid JSON path escaping.</td></tr>
+        <tr><td>Connection refused</td><td>Start the Slurp backend and check its printed API address. <code>slurp mcp</code> alone does not start it. Match the API port in <code>--api</code>.</td></tr>
+        <tr><td>API returned 401 Unauthorized</td><td>Check that the MCP child uses the same OS user/home as the backend. Remove an outdated <code>SLURP_API_TOKEN</code> override or update it to the correct backend token, then restart the MCP connection.</td></tr>
+        <tr><td>No tools / invalid protocol response</td><td>Configure local stdio with the <code>mcp</code> argument, not a URL or the regular Slurp startup command. Avoid shell wrappers that print banners to stdout. Check the client's MCP logs.</td></tr>
+        <tr><td>No matching history</td><td>Capture traffic first and check the workspace filter. Use <code>temporary</code> for in-memory traffic. <code>list_workspaces</code> lists saved workspaces, not the temporary session.</td></tr>
+        <tr><td>Old behavior after an update</td><td>Update the executable path in the MCP configuration and restart its child process. Existing clients can keep an older executable running after a new binary has been built.</td></tr>
+        <tr><td>Web UI says Proxy offline</td><td>The UI's WebSocket status is separate from MCP stdio. Check the running binary version, open the authenticated startup URL and reload the UI. Test an MCP read tool separately.</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+</body>
+</html>

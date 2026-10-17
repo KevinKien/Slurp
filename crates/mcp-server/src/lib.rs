@@ -24,7 +24,15 @@ impl Backend {
     pub fn new(api_base: &str) -> Self {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         Self {
-            http: reqwest::Client::new(),
+            http: {
+                let home=std::env::var_os(if cfg!(windows){"USERPROFILE"}else{"HOME"});
+                let token=std::env::var("SLURP_API_TOKEN").ok().or_else(||home.and_then(|h|std::fs::read_to_string(std::path::PathBuf::from(h).join(".slurp/api-token")).ok()));
+                let mut headers=reqwest::header::HeaderMap::new();
+                if let Some(token)=token.filter(|v|v.len()==64&&v.bytes().all(|b|b.is_ascii_hexdigit())) {
+                    let mut value=reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")).unwrap();value.set_sensitive(true);headers.insert(reqwest::header::AUTHORIZATION,value);
+                }
+                reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(35)).default_headers(headers).build().expect("MCP HTTP client")
+            },
             base: api_base.trim_end_matches('/').to_string(),
         }
     }

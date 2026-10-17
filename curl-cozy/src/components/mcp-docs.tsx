@@ -110,6 +110,9 @@ export function McpView() {
             </a>{' '}
             server runs on your machine and talks to this app’s proxy; Replay requests are sent to the target you choose.
           </p>
+          <a href="/docs/mcp.html" target="_blank" rel="noopener noreferrer" className="mt-3 inline-block text-sm text-primary underline underline-offset-2">
+            Client setup guide: Claude, Codex, DeepSeek Harness, OpenCode and Antigravity
+          </a>
           <div className="mt-4 flex items-center gap-2 text-xs text-muted-foreground" role="status">
             <span className={cn('size-1.5 rounded-full', proxyStatus === 'connected' ? 'bg-primary' : 'bg-destructive')} />
             {proxyStatus === 'connected'
@@ -124,6 +127,7 @@ export function McpView() {
             The client launches <code className="font-mono">slurp mcp</code> itself (stdio). Keep the proxy
             running in another terminal.
             {!useDetectedPath && ' Add the directory containing slurp to the PATH used by your MCP client so it can find the executable.'}
+            {' When running as the same OS user, MCP reads ~/.slurp/api-token automatically; no token is needed in this configuration.'}
           </p>
           {exe && <label className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
             <input type="checkbox" checked={useDetectedPath} onChange={event => setUseDetectedPath(event.target.checked)} className="accent-primary" />

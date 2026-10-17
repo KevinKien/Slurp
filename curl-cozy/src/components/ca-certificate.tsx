@@ -1,14 +1,13 @@
 import { ArrowDownToLine } from 'lucide-react';
+import { authorizedFetch } from '@/lib/api-auth';
+import { toast } from 'sonner';
 import { API_BASE } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 
 export function DownloadCaButton({ compact = false }: { compact?: boolean }) {
-  return <Button asChild variant="outline" size="sm">
-    <a href={`${API_BASE}/api/ca.crt`} download="ca.crt" title="Download CA certificate" aria-label="Download CA certificate">
-      <ArrowDownToLine className="size-4"/>
-      <span className={compact ? 'hidden sm:inline' : undefined}>{compact ? 'CA certificate' : 'Download ca.crt'}</span>
-    </a>
-  </Button>;
+  return <Button variant="outline" size="sm" title="Download CA certificate" aria-label="Download CA certificate" onClick={async()=>{
+    try { const response=await authorizedFetch(`${API_BASE}/api/ca.crt`);if(!response.ok)throw Error('Could not download CA certificate');const url=URL.createObjectURL(await response.blob());const link=document.createElement('a');link.href=url;link.download='ca.crt';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000); } catch(error) {toast.error(error instanceof Error?error.message:'Download failed');}
+  }}><ArrowDownToLine className="size-4"/><span className={compact ? 'hidden sm:inline' : undefined}>{compact ? 'CA certificate' : 'Download ca.crt'}</span></Button>;
 }
 
 export function CaCertificateSettings() {

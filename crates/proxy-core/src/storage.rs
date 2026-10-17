@@ -403,11 +403,25 @@ impl TrafficStorage {
             if let Some(parent) = Path::new(db_path).parent() {
                 std::fs::create_dir_all(parent)?;
             }
+            if !Path::new(db_path).exists() {
+                match crate::private_files::create(Path::new(db_path), b"") {
+                    Ok(()) => {},
+                    Err(error) if !Path::new(db_path).exists() => return Err(error),
+                    Err(_) => {},
+                }
+            }
+            crate::private_files::restrict(Path::new(db_path), false)?;
             Connection::open(db_path)?
         };
 
         // Enable WAL mode for better concurrent read performance
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+        if db_path != ":memory:" {
+            for suffix in ["-wal", "-shm"] {
+                let sidecar = format!("{db_path}{suffix}");
+                if Path::new(&sidecar).exists() { crate::private_files::restrict(Path::new(&sidecar), false)?; }
+            }
+        }
 
         conn.execute_batch(TRAFFIC_TABLE)?;
         conn.execute_batch(crate::websocket::SCHEMA)?;

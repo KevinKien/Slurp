@@ -1,3 +1,4 @@
+import { authorizedFetch } from '@/lib/api-auth';
 import { websocketRequest } from '@/lib/websocket-request';
 import { useEffect, useState, type ReactNode } from 'react';
 import { Link } from '@tanstack/react-router';
@@ -14,7 +15,7 @@ type Frame = {id:number;direction:string;timestamp:string;opcode:number;fin:bool
 const opcode = (n:number) => ({0:'Continuation',1:'Text',2:'Binary',8:'Close',9:'Ping',10:'Pong'}[n] ?? `Opcode ${n}`);
 const time = (s:string) => new Date(s).toLocaleString();
 async function read<T>(path:string, signal:AbortSignal):Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`,{signal});
+  const response = await authorizedFetch(`${API_BASE}${path}`,{signal});
   if (!response.ok) throw new Error(`Could not load WebSocket traffic (${response.status})`);
   return response.json();
 }

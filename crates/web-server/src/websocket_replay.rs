@@ -117,7 +117,7 @@ async fn emit(socket: &mut WebSocket, value: Value) -> bool {
     )
 }
 pub async fn handler(ws: WebSocketUpgrade) -> impl IntoResponse {
-    ws.max_message_size(2_100_000).on_upgrade(run)
+    ws.protocols(["slurp.v1"]).max_message_size(2_100_000).on_upgrade(run)
 }
 async fn run(mut browser: WebSocket) {
     let result = async {

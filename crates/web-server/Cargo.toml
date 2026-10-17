@@ -18,11 +18,14 @@ anyhow = { workspace = true }
 futures-util = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-tls-webpki-roots-no-provider", "gzip", "brotli", "deflate", "zstd"] }
 rustls = { workspace = true }
+uuid = { workspace = true }
 if-addrs = "0.13"
 
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 
 [dev-dependencies]
+tower = { workspace = true, features = ["util"] }
+tempfile = "3"
 flate2 = "1"
 brotli = "8"
 zstd = "0.13"

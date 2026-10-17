@@ -18,3 +18,5 @@ pub mod listener;
 pub use listener::{ProxyControl, ProxyListener};
 
 pub mod websocket;
+
+pub mod private_files;

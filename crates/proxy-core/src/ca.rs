@@ -39,7 +39,7 @@ impl CertificateAuthority {
     /// - `ca.key` — PEM-encoded private key (KEEP SECRET!)
     /// - `ca.crt` — PEM-encoded certificate (install this in OS/browser)
     pub fn load_or_create(ca_dir: &Path) -> Result<Self> {
-        std::fs::create_dir_all(ca_dir)
+        crate::private_files::directory(ca_dir)
             .with_context(|| format!("Failed to create CA directory: {}", ca_dir.display()))?;
 
         let key_path = ca_dir.join("ca.key");
@@ -95,10 +95,10 @@ impl CertificateAuthority {
 
         // 4. Save to disk
         let key_pem = ca_key_pair.serialize_pem();
-        std::fs::write(key_path, &key_pem).context("Failed to write CA private key")?;
+        crate::private_files::create(key_path, key_pem.as_bytes()).context("Failed to write CA private key")?;
 
         let cert_pem = ca_cert.pem();
-        std::fs::write(cert_path, &cert_pem).context("Failed to write CA certificate")?;
+        crate::private_files::create(cert_path, cert_pem.as_bytes()).context("Failed to write CA certificate")?;
 
         // Set restrictive permissions on the private key
         #[cfg(unix)]

@@ -86,7 +86,6 @@
     "@types/react-dom": "^19.2.0",
     "@types/shell-quote": "^1.7.5",
     "@vitejs/plugin-react": "^5.2.0",
-    "drizzle-kit": "0.x",
     "drizzle-orm": "0.x",
     "eslint": "^9.32.0",
     "eslint-config-prettier": "^10.1.1",

@@ -1,3 +1,4 @@
+import { websocketProtocols } from '@/lib/api-auth';
 import { useEffect, useRef, useState, useCallback } from "react";
 import { WS_URL, type ApiTrafficEntry, type HeldItem, type InterceptSettings } from "./api";
 import { mapApiEntry, type Traffic } from "./traffic";
@@ -61,7 +62,7 @@ export function useTrafficStream(
     setStatus("connecting");
 
     try {
-      const ws = new WebSocket(WS_URL);
+      const ws = new WebSocket(WS_URL, websocketProtocols());
       wsRef.current = ws;
 
       ws.onopen = () => {

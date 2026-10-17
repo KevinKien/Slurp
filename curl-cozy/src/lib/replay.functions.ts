@@ -1,3 +1,4 @@
+import { authorizedFetch } from '@/lib/api-auth';
 import { API_BASE } from './api';
 
 export interface SendRequest {
@@ -15,7 +16,7 @@ export type SendResult = {
 // Keep the call shape shared by Replay, Flows, Intruder, Matrix and Scan.
 export async function sendHttpRequest({ data }: { data: SendRequest }): Promise<SendResult> {
   try {
-    const response = await fetch(`${API_BASE}/api/replay/send`, {
+    const response = await authorizedFetch(`${API_BASE}/api/replay/send`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data), signal: AbortSignal.timeout(data.timeout + 5000),
     });

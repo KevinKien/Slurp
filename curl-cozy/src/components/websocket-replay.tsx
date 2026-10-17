@@ -1,3 +1,4 @@
+import { websocketProtocols } from '@/lib/api-auth';
 import { useEffect, useRef, useState } from 'react';
 import { useInspector } from '@/components/inspector';
 import { Button } from '@/components/ui/button';
@@ -31,7 +32,7 @@ export function WebSocketReplay() {
    const request=resolveReplayRequest({...tab.request,headers:parsed as Record<string,string>},variables,"websocket");
    if(!/^wss?:\/\//i.test(request.url))throw new Error('Use a ws:// or wss:// URL.');
    disconnect();setError('');setStatus('Connecting');
-   const ws=new WebSocket(`${API_BASE.replace(/^http/,'ws')}/api/replay/websocket`);socket.current=ws;
+   const ws=new WebSocket(`${API_BASE.replace(/^http/,'ws')}/api/replay/websocket`, websocketProtocols());socket.current=ws;
    ws.onopen=()=>{if(socket.current===ws)ws.send(JSON.stringify({url:request.url,headers:request.headers}));};
    ws.onmessage=event=>{if(socket.current!==ws)return;try{const data=JSON.parse(event.data);if(data.type==='connected'){setStatus('Connected');log({direction:'system',kind:'handshake',body:`101 Switching Protocols\n${JSON.stringify(data.headers,null,2)}`,time:new Date().toISOString()});}if(data.type==='error')setError(data.error);if(data.type==='closed')setStatus('Disconnected');if(data.type==='message')log({...data,time:new Date().toISOString()});}catch{setError('Invalid response from WebSocket Replay.');}};
    ws.onerror=()=>{if(socket.current===ws)setError('Could not connect to WebSocket Replay.');};

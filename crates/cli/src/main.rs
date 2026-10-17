@@ -41,6 +41,7 @@ async fn main() -> Result<()> {
     // 1. Setup CA
     // Migrate the legacy directory once, retaining the trusted CA and saved workspaces.
     let ca_dir = data_dir(&dirs_home()?)?;
+    let access = web_server::access::ApiAccess::load(&ca_dir)?;
     let ca = Arc::new(CertificateAuthority::load_or_create(&ca_dir)?);
     ca.print_install_instructions();
 
@@ -74,13 +75,15 @@ async fn main() -> Result<()> {
     let web_storage = storage.clone();
     let web_intercept = intercept.clone();
     let public_ca = web_server::certificate::PublicCaCertificate(Arc::from(std::fs::read(ca.ca_cert_path())?));
+    let web_access = access.clone();
     let web_task = tokio::spawn(async move {
-        web_server::serve(web_listener, web_storage, web_intercept, proxy_control, public_ca).await
+        web_server::serve(web_listener, web_storage, web_intercept, proxy_control, public_ca, web_access).await
     });
 
     // 5. Start proxy server (foreground)
     let proxy_config = ProxyConfig {
         listen_addr: proxy_addr,
+        management_addr: Some(web_addr),
         max_body_size: 10 * 1024 * 1024,
     };
     let proxy = ProxyServer::new(proxy_config, ca.clone(), storage.clone(), intercept);
@@ -89,7 +92,7 @@ async fn main() -> Result<()> {
     println!("   Proxy:    http://{proxy_addr}");
     let mut browser_addr = web_addr;
     if browser_addr.ip().is_unspecified() { browser_addr.set_ip(if browser_addr.is_ipv4() { std::net::Ipv4Addr::LOCALHOST.into() } else { std::net::Ipv6Addr::LOCALHOST.into() }); }
-    let ui_url = format!("http://{browser_addr}/dashboard");
+    let ui_url = format!("http://{browser_addr}/dashboard#slurp-token={}",access.token());
     println!("   UI:       {ui_url}");
     println!("   API:      http://{web_addr}/api/traffic");
     println!("   WebSocket: ws://{web_addr}/api/ws");

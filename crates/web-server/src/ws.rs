@@ -12,7 +12,7 @@ pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(storage): State<Arc<TrafficStorage>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, storage))
+    ws.protocols(["slurp.v1"]).on_upgrade(move |socket| handle_socket(socket, storage))
 }
 
 async fn handle_socket(socket: WebSocket, storage: Arc<TrafficStorage>) {

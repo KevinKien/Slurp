@@ -168,6 +168,7 @@ Add the directory containing `slurp` (`slurp.exe` on Windows) to the PATH availa
 
 ## Guides
 
+- [MCP client setup: Claude, Codex, DeepSeek Harness, OpenCode and Antigravity](curl-cozy/public/docs/mcp.html)
 - [Building and distributing Slurp](BUILD.md)
 - [Replay scripting](curl-cozy/public/docs/replay-scripts.html)
 - [Flows](curl-cozy/public/docs/flows.html)
