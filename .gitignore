@@ -18,6 +18,7 @@ test-results/
 *.tsbuildinfo
 
 # Local configuration and secrets (keep example templates)
+/dev.sh
 /.local-git-backups/
 .env
 .env.*
