@@ -1,0 +1,35 @@
+name: Build Slurp
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2022, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 'latest'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install frontend dependencies
+        working-directory: curl-cozy
+        run: bun install --frozen-lockfile
+      - name: Build native release
+        run: node scripts/build.mjs
+      - name: Package native release
+        run: node scripts/package.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: slurp-${{ runner.os }}-${{ runner.arch }}
+          path: dist/artifacts/*
+          if-no-files-found: error

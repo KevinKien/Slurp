@@ -1,0 +1,16 @@
+[package]
+name = "slurp"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+embedded-ui = ["web-server/embedded-ui"]
+
+[dependencies]
+proxy-core = { path = "../proxy-core" }
+web-server = { path = "../web-server" }
+mcp-server = { path = "../mcp-server" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }

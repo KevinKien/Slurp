@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/proxy-core",
+    "crates/web-server",
+    "crates/mcp-server",
+    "crates/cli",
+]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
+bytes = "1"
+rustls = "0.23"
+tokio-rustls = "0.26"
+rcgen = { version = "0.13", features = ["x509-parser"] }
+time = "0.3"
+rustls-pemfile = "2"
+axum = { version = "0.7", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "fs"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+dashmap = "6"
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+# Local API clients use plain HTTP. web-server enables TLS without a second crypto provider for Replay.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }

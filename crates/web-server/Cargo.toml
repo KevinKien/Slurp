@@ -1,0 +1,28 @@
+[package]
+name = "web-server"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+embedded-ui = []
+
+[dependencies]
+proxy-core = { path = "../proxy-core" }
+tokio = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+futures-util = { workspace = true }
+reqwest = { workspace = true, features = ["rustls-tls-webpki-roots-no-provider", "gzip", "brotli", "deflate", "zstd"] }
+rustls = { workspace = true }
+if-addrs = "0.13"
+
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
+
+[dev-dependencies]
+flate2 = "1"
+brotli = "8"
+zstd = "0.13"
