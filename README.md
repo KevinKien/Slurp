@@ -28,6 +28,7 @@ Planned development builds on the current inspection and scan capabilities:
 - **Common vulnerability scanning:** expand automated checks for common web and API vulnerabilities, with evidence and verification to reduce false positives.
 - **Specialized vulnerability scanning:** add dedicated scan workflows for individual vulnerability classes, with deeper configuration and validation.
 - **Template-based scanning:** support reusable scan templates for defining requests, payloads, matchers and verification steps.
+- **Burp project import:** add support for importing `.burp` project files into Slurp.
 - **Analysis plugins:** develop a plugin system for extending Slurp, including JavaScript analysis and endpoint discovery.
 - **Parameter discovery:** discover and test additional query, body and header parameters.
 - **GraphQL integration:** add GraphQL-aware inspection, request editing, schema exploration and security testing.
