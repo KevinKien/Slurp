@@ -204,7 +204,7 @@ export function ScanView() {
                 <p className="text-xs text-muted-foreground">
                   {plan.mode === "passive"
                     ? "Inspects the captured response without sending requests. Cookie checks need separate Set-Cookie fields; collapsed history headers can be inconclusive."
-                    : "Uses the selected profile and the Replay public HTTPS sender. Requests run sequentially. Repeated requests may change server state."}
+                    : "Uses the selected profile and the Replay HTTP(S) sender (including localhost and LAN). Requests run sequentially. Repeated requests may change server state."}
                 </p>
                 <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                   {scanChecks.map((check) => (

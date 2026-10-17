@@ -11,19 +11,7 @@ pub(crate) fn validate(data: &Value) -> Result<(reqwest::Url, u64), String> {
             .to_string()
     })?;
     let url = reqwest::Url::parse(data["url"].as_str().unwrap()).map_err(|e| e.to_string())?;
-    let host = url.host_str().unwrap_or("");
-    if url.scheme() != "https"
-        || url.port_or_known_default() != Some(443)
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || host.parse::<std::net::IpAddr>().is_ok()
-        || !host.contains('.')
-        || ["localhost", "local", "internal", "test", "invalid"]
-            .iter()
-            .any(|s| host == *s || host.ends_with(&format!(".{s}")))
-    {
-        return Err("Replay supports public HTTPS hosts only.".into());
-    }
+    super::http_target::validate(&url)?;
     let timeout = data["timeout"]
         .as_u64()
         .filter(|n| (1000..=30000).contains(n))
@@ -89,24 +77,7 @@ async fn read_response(mut response: reqwest::Response, start: Instant) -> Resul
 }
 async fn execute(data: &Value, url: reqwest::Url, timeout: u64) -> Result<Value, String> {
     let start = Instant::now();
-    let host = url.host_str().unwrap();
-    let addresses: Vec<_> =
-        tokio::time::timeout(Duration::from_secs(5), tokio::net::lookup_host((host, 443)))
-            .await
-            .map_err(|_| "DNS lookup timed out".to_string())?
-            .map_err(|e| e.to_string())?
-            .collect();
-    if addresses.is_empty() || addresses.iter().any(|a| !super::replay::public_ip(a.ip())) {
-        return Err("This host is unavailable or is not a public address.".into());
-    }
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_millis(timeout))
-        .resolve_to_addrs(host, &addresses)
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = super::http_target::client(&url, timeout).await?;
     let mut request = client.request(
         data["method"]
             .as_str()
@@ -139,22 +110,35 @@ pub async fn send(Json(data): Json<Value>) -> Json<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn sends_local_post_and_preserves_redirects_on_custom_ports() {
+        use axum::{routing::{get, post}, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = Router::new()
+            .route("/login", post(|body: String| async move { body }))
+            .route("/redirect", get(|| async {
+                (axum::http::StatusCode::FOUND, [("location", "/must-not-follow")], "redirect")
+            }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        for host in ["127.0.0.1", "localhost"] {
+            let result = send(Json(json!({"method":"POST","url":format!("http://{host}:{port}/login"),"headers":{"Content-Type":"application/json"},"body":"{\"email\":\"local\"}","timeout":2000}))).await.0;
+            assert_eq!(result["ok"], true, "{result}");
+            assert_eq!(result["status"], 200);
+            assert_eq!(result["responseBody"], "{\"email\":\"local\"}");
+        }
+        let result = send(Json(json!({"method":"GET","url":format!("http://127.0.0.1:{port}/redirect"),"headers":{},"body":"","timeout":2000}))).await.0;
+        assert_eq!(result["status"], 302);
+        assert_eq!(result["responseBody"], "redirect");
+        server.abort();
+    }
     #[test]
-    fn rejects_private_schemes_credentials_and_invalid_input() {
-        for url in [
-            "http://example.com",
-            "https://127.0.0.1",
-            "https://[::1]",
-            "https://example.internal",
-            "https://u:p@example.com",
-            "https://example.com:444",
-            "https://localhost",
-        ] {
-            assert!(
-                validate(&json!({"method":"GET","url":url,"headers":{},"body":"","timeout":1000}))
-                    .is_err(),
-                "{url}"
-            );
+    fn accepts_http_local_lan_and_custom_ports_but_rejects_invalid_input() {
+        for url in ["ftp://example.com", "file:///tmp/a", "https://u:p@example.com", "http://localhost:0"] {
+            assert!(validate(&json!({"method":"GET","url":url,"headers":{},"body":"","timeout":1000})).is_err(), "{url}");
+        }
+        for url in ["http://localhost:8088", "http://127.0.0.1:8088", "http://[::1]:8088", "http://192.168.1.20:3000", "https://example.internal:8443", "https://example.com", "http://example.com"] {
+            assert!(validate(&json!({"method":"GET","url":url,"headers":{},"body":"","timeout":1000})).is_ok(), "{url}");
         }
         let mut data = json!({"method":"POST","url":"https://example.com","headers":{},"body":"hi","timeout":1000});
         assert!(validate(&data).is_ok());
@@ -210,7 +194,7 @@ mod tests {
     #[tokio::test]
     async fn errors_keep_browser_result_contract() {
         let result = send(Json(
-            json!({"method":"GET","url":"http://localhost","headers":{},"body":"","timeout":1000}),
+            json!({"method":"GET","url":"file:///tmp/test","headers":{},"body":"","timeout":1000}),
         ))
         .await
         .0;

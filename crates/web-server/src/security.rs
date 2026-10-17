@@ -54,12 +54,12 @@ pub fn validate_profiles(doc: &Value) -> Result<(), Error> {
         for origin in origins {
             let origin = origin.as_str().ok_or_else(|| bad("Invalid origin"))?;
             let url = reqwest::Url::parse(origin).map_err(bad)?;
-            if url.scheme() != "https"
+            if !["http", "https"].contains(&url.scheme())
                 || !url.username().is_empty()
                 || url.password().is_some()
                 || url.origin().ascii_serialization() != origin
             {
-                return Err(bad("Expected an HTTPS origin"));
+                return Err(bad("Expected an HTTP(S) origin"));
             }
         }
         crate::replay::validate_variables(&profile["variables"])?;

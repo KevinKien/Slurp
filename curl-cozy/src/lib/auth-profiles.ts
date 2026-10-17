@@ -55,8 +55,8 @@ export function validateProfiles(doc: ProfilesDocument) {
       throw Error("Up to 20 allowed origins per profile.");
     for (const origin of p.origins) {
       const url = new URL(origin);
-      if (url.origin !== origin || url.protocol !== "https:" || url.username || url.password)
-        throw Error("Origins must be HTTPS origins, such as https://api.example.com.");
+      if (url.origin !== origin || !["http:", "https:"].includes(url.protocol) || url.username || url.password)
+        throw Error("Origins must be HTTP(S) origins, such as http://localhost:8088.");
     }
     validateFlowVariables(p.variables);
     if (

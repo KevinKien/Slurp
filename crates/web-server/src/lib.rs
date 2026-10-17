@@ -1,5 +1,6 @@
 /// Web server providing REST API and WebSocket for the curl-cozy frontend.
 pub mod api;
+pub mod certificate;
 pub mod intruder;
 pub mod scan;
 pub mod security;
@@ -8,6 +9,7 @@ pub mod flows;
 pub mod origin;
 pub mod replay;
 pub mod http_sender;
+mod http_target;
 pub mod ui;
 pub mod ws;
 pub mod websocket;
@@ -29,13 +31,13 @@ use tracing::info;
 /// - WebSocket at `/api/ws`
 ///
 /// Browsers may only reach it from pages served on this machine (see `origin`).
-pub async fn start(addr: SocketAddr, storage: Arc<TrafficStorage>, intercept: Arc<Intercept>, proxy_control: proxy_core::ProxyControl) -> Result<()> {
+pub async fn start(addr: SocketAddr, storage: Arc<TrafficStorage>, intercept: Arc<Intercept>, proxy_control: proxy_core::ProxyControl, certificate: certificate::PublicCaCertificate) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    serve(listener, storage, intercept, proxy_control).await
+    serve(listener, storage, intercept, proxy_control, certificate).await
 }
 
 /// Serve an already-bound listener so the CLI can fail before reporting readiness.
-pub async fn serve(listener: tokio::net::TcpListener, storage: Arc<TrafficStorage>, intercept: Arc<Intercept>, proxy_control: proxy_core::ProxyControl) -> Result<()> {
+pub async fn serve(listener: tokio::net::TcpListener, storage: Arc<TrafficStorage>, intercept: Arc<Intercept>, proxy_control: proxy_core::ProxyControl, certificate: certificate::PublicCaCertificate) -> Result<()> {
     let origins = origin::AllowedOrigins::from_env();
     let cors = CorsLayer::new()
         .allow_origin(origins.cors_predicate())
@@ -43,6 +45,7 @@ pub async fn serve(listener: tokio::net::TcpListener, storage: Arc<TrafficStorag
         .allow_headers(Any);
 
     let app = Router::new()
+        .route("/api/ca.crt", get(certificate::download))
         .route("/api/websockets", get(websocket::connections))
         .route("/api/websockets/:id/frames", get(websocket::frames))
         .route("/api/replay/websocket", get(websocket_replay::handler))
@@ -53,7 +56,7 @@ pub async fn serve(listener: tokio::net::TcpListener, storage: Arc<TrafficStorag
         .route("/api/traffic", get(api::list_traffic).delete(api::clear_traffic).post(api::save_traffic))
         .route("/api/history", get(api::history_page))
         .route("/api/traffic/export", get(api::export_traffic))
-        .route("/api/traffic/:id", get(api::get_traffic))
+        .route("/api/traffic/:id", get(api::get_traffic).delete(api::delete_traffic))
         .route("/api/traffic/:id/annotation", axum::routing::patch(api::annotate_traffic))
         .route("/api/stats", get(api::get_stats))
         .route("/api/info", get(api::get_info))
@@ -108,6 +111,7 @@ pub async fn serve(listener: tokio::net::TcpListener, storage: Arc<TrafficStorag
         // Shared state
         .layer(Extension(intercept))
         .layer(Extension(proxy_control))
+        .layer(Extension(certificate))
         .with_state(storage)
         .fallback(ui::serve);
 

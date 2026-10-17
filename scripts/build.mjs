@@ -17,7 +17,7 @@ if (process.argv.slice(2).some(arg => arg !== '--backend-only')) {
 if (!['darwin', 'linux', 'win32'].includes(process.platform)) throw new Error('Unsupported platform');
 if (process.env.CARGO_BUILD_TARGET) throw new Error('Native builds only: unset CARGO_BUILD_TARGET.');
 const label = { darwin: 'macos', linux: 'linux', win32: 'windows' }[process.platform];
-const version = readFileSync(join(root, 'crates/cli/Cargo.toml'), 'utf8').match(/^version = "([^"]+)"/m)[1];
+const version = readFileSync(join(root, 'Cargo.toml'), 'utf8').match(/^version = "([^"]+)"/m)[1];
 const output = join(root, 'dist', `slurp-${version}-${label}-${process.arch}${backendOnly ? '-backend' : '-standalone'}`);
 if (existsSync(output)) throw new Error(`Output already exists: ${output}. Move it aside before rebuilding.`);
 function run(command, args, cwd = root, extraEnv = {}) {

@@ -21,7 +21,7 @@ vi.mock("@/lib/ws", () => ({ useTrafficStream: () => ({ status: "disconnected" }
 vi.mock("@/lib/replay.functions", () => ({ sendHttpRequest: send }));
 vi.mock("@/components/ui/resizable", () => {
   const Box = ({ children }: { children?: React.ReactNode }) => <div>{children}</div>;
-  return { ResizablePanelGroup: Box, ResizablePanel: Box, ResizableHandle: () => null };
+  return { HistoryPanelGroup: Box, ResizablePanelGroup: Box, ResizablePanel: Box, ResizableHandle: () => null };
 });
 vi.mock("@tanstack/react-start", () => ({ useServerFn: (fn: unknown) => fn }));
 vi.mock("@tanstack/react-router", () => ({ Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a> }));

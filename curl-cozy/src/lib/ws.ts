@@ -79,6 +79,8 @@ export function useTrafficStream(
           } else if (data.type === "entry_updated" && data.entry) {
             const mapped = mapApiEntry(data.entry as ApiTrafficEntry);
             onNewEntryRef.current(mapped);
+          } else if (data.type === "entry_deleted") {
+            window.dispatchEvent(new CustomEvent("slurp:traffic-deleted", {detail:data}));
           } else if (data.type === "cleared") {
             onClearedRef.current?.();
           } else if (data.type === "workspace_cleared") {

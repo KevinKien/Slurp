@@ -1,8 +1,10 @@
+import { slurpVersion } from "./slurp-version";
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import path from "node:path";
 
 export default defineConfig({
+  define: { "import.meta.env.VITE_SLURP_VERSION": JSON.stringify(slurpVersion) },
   plugins: [react()],
   test: {
     environment: "jsdom",

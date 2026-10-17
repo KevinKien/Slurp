@@ -404,7 +404,7 @@ export function FlowStepEditor({
         </p>
       )}
       <p className="text-muted-foreground">
-        Apply changes before running or selecting another step. Sending uses Replay's public HTTPS
+        Apply changes before running or selecting another step. Sending uses Replay's HTTP(S)
         and timeout rules.
       </p>
     </div>

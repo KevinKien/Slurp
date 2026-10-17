@@ -30,6 +30,15 @@ fn request(
         return Err("Use a public ws:// host on port 80 or wss:// host on port 443.".into());
     }
     let mut validation = url.clone();
+    let host = url.host_str().unwrap_or("");
+    if host.parse::<std::net::IpAddr>().is_ok()
+        || host.starts_with('[')
+        || !host.contains('.')
+        || ["localhost", "local", "internal", "test", "invalid"].iter()
+            .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")))
+    {
+        return Err("Use a public WebSocket hostname.".into());
+    }
     validation
         .set_scheme("https")
         .map_err(|_| "Invalid scheme")?;

@@ -42,11 +42,29 @@ node scripts/package.mjs
 
 Packages and SHA-256 checksums are written to `dist/artifacts/`:
 
-- macOS: `slurp-<version>-macos-<arch>.dmg`. Copy the Slurp folder out of the disk image, then double-click `Start Slurp.command` to launch in Terminal. Ctrl+C stops the server. The DMG is unsigned and not notarized.
+- macOS Intel: `slurp-<version>-macos-x64.dmg`.
+- macOS Apple Silicon: `slurp-<version>-macos-arm64.dmg`.
+- macOS Terminal: `slurp-<version>-macos-<arch>-cli.tar.gz`; a separate `macos-universal-cli.tar.gz` supports both CPU families.
 - Linux: `slurp-<version>-linux-<arch>`, an executable binary. After downloading, run `chmod +x slurp-*` if the download removed executable permissions.
 - Windows: `slurp-<version>-windows-<arch>.exe`, a standalone executable.
 
 The UI and API are embedded in each executable. These are native builds, not renamed binaries from another OS. To package an existing native standalone directory, use `node scripts/package.mjs --input <directory>`.
+
+### Install the macOS app
+
+Requires macOS 12 or newer. Open the DMG and drag **Slurp.app** onto **Applications**, then launch it from Applications or Launchpad. It starts the bundled Rust backend and opens the web UI in your browser. Use **Open Slurp** in the menu bar or reopen the Dock icon to return to the UI. Use **Quit Slurp** (Cmd+Q with Slurp active) to stop both the app and its backend. Closing the browser leaves the backend running. Startup failures, such as a port conflict with a CLI instance, show an error instead of starting a second server.
+
+The app, its executables and DMG use free **ad-hoc signatures**, not Developer ID signing or notarization. macOS may block a downloaded app on first launch; use **System Settings → Privacy & Security → Open Anyway** if available. No Apple Developer account is required to build these packages.
+
+Data and CA remain in `~/.slurp`. GUI logs are in `~/Library/Logs/Slurp/slurp.log`. Do not run the GUI and CLI on the same ports at the same time. The CLI archive contains a plain `slurp` executable with the embedded UI/API; it is distinct from `--backend-only`, which omits UI assets.
+
+To package a cross-compiled ARM64 binary on an Intel Mac, place it in `dist/slurp-<version>-macos-arm64-standalone/slurp` and run `node scripts/package.mjs --arch arm64`. The script verifies the binary's architecture and cross-compiles the native launcher against the macOS SDK.
+
+Combine the native CLI packages into a single universal CLI archive:
+
+```sh
+node scripts/package-macos-cli.mjs --intel dist/artifacts/slurp-1.0.1-macos-x64-cli.tar.gz --arm64 dist/artifacts/slurp-1.0.1-macos-arm64-cli.tar.gz
+```
 
 ## Run
 
@@ -74,6 +92,14 @@ No Node.js, npm or Bun is needed on the destination machine. Copy the executable
 
 Startup creates or loads the CA and workspace data in `~/.slurp` on macOS/Linux or `%USERPROFILE%\.slurp` on Windows. Install `ca.crt` in the client trust store for HTTPS interception.
 
+Download the running proxy's public CA from the **CA certificate** button in the web header or **Settings → HTTPS CA certificate**. The download endpoint is `/api/ca.crt`.
+
+Windows curl using Schannel may report `CERT_TRUST_REVOCATION_STATUS_UNKNOWN` because the local CA has no online CRL/OCSP service. Allow unavailable revocation status while retaining certificate verification:
+
+```powershell
+curl.exe -x http://127.0.0.1:8888 --cacert "$HOME\.slurp\ca.crt" --ssl-revoke-best-effort https://httpbin.org/get
+```
+
 ## Backend only
 
 ```sh
@@ -88,4 +114,8 @@ This requires Rust and Node to run the build script, but no frontend dependencie
 
 ## GitHub Actions
 
-The [build workflow](.github/workflows/build.yml) runs native Ubuntu, Windows and macOS builds. Select **Actions → Build Slurp → Run workflow**, or push a version tag such as `v0.1.0`. Download the platform artifacts: macOS DMG, Linux binary, or Windows EXE, each with a SHA-256 checksum. The macOS runner builds ARM64; the Ubuntu and Windows runners build x64. The workflow does not publish a GitHub Release or deploy the app.
+The [build workflow](.github/workflows/build.yml) runs native Ubuntu, Windows and macOS builds. Select **Actions → Build Slurp → Run workflow**, or push a version tag such as `v1.0.1`. Download the platform artifacts: macOS DMG/CLI, Linux binary, or Windows EXE, each with a SHA-256 checksum. Separate macOS runners build Apple Silicon (`macos-15`, ARM64) and Intel (`macos-15-intel`, x64) DMGs and native CLI archives. A follow-up job combines the two CLI executables into one universal macOS archive. The Ubuntu and Windows runners build x64. The workflow does not publish a GitHub Release or deploy the app.
+
+## Release version
+
+The version in the root `Cargo.toml` (`[workspace.package]`) is the single source for Rust crates, the UI footer, HAR creator metadata, and package names. Update it before a release, run `cargo check --offline` to refresh `Cargo.lock`, then rebuild the UI and binaries. Ordinary commits do not change the release version. After committing a release, create a matching tag such as `v1.0.1` to trigger the release build workflow.

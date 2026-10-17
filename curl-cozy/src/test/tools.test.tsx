@@ -5,12 +5,12 @@ import { ToolsView } from "@/components/tools";
 describe("Tools", () => {
   it("round trips Unicode through Base64", () => {
     render(<ToolsView />);
-    fireEvent.change(screen.getByLabelText("Input"), { target: { value: "Xin chào" } });
+    fireEvent.change(screen.getByLabelText("Input"), { target: { value: "Hello ✓" } });
     fireEvent.click(screen.getByRole("button", { name: "Encode" }));
-    expect(screen.getByLabelText("Output")).toHaveValue("WGluIGNow6Bv");
+    expect(screen.getByLabelText("Output")).toHaveValue("SGVsbG8g4pyT");
     fireEvent.click(screen.getByRole("button", { name: "Swap" }));
     fireEvent.click(screen.getByRole("button", { name: "Decode" }));
-    expect(screen.getByLabelText("Output")).toHaveValue("Xin chào");
+    expect(screen.getByLabelText("Output")).toHaveValue("Hello ✓");
   });
   it("generates distinct UUIDs in a batch", () => {
     render(<ToolsView />);

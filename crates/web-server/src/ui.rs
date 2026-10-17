@@ -9,6 +9,9 @@ fn asset_path(path: &str) -> Option<&str> {
         return None;
     }
     let path = path.trim_start_matches('/');
+    if path.trim_end_matches('/') == "docs" {
+        return Some("docs/index.html");
+    }
     if [
         "",
         "dashboard",
@@ -110,12 +113,14 @@ mod tests {
             assert_eq!(asset_path(path), None);
         }
         assert_eq!(asset_path("/docs/scan.html"), Some("docs/scan.html"));
+        assert_eq!(asset_path("/docs"), Some("docs/index.html"));
+        assert_eq!(asset_path("/docs/"), Some("docs/index.html"));
         assert_eq!(mime("engine.wasm"), "application/wasm");
     }
     #[cfg(feature = "embedded-ui")]
     #[tokio::test]
     async fn embedded_routes_docs_wasm_and_head_work_without_disk_assets() {
-        for path in ["/dashboard", "/replay", "/docs/scan.html", "/favicon.svg"] {
+        for path in ["/dashboard", "/replay", "/docs", "/docs/", "/docs/scan.html", "/favicon.svg"] {
             let response = serve(Method::GET, path.parse().unwrap()).await;
             assert_eq!(response.status(), StatusCode::OK, "{path}");
             let bytes = axum::body::to_bytes(response.into_body(), 8_000_000).await.unwrap();

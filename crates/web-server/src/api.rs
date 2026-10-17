@@ -452,3 +452,10 @@ pub async fn annotate_traffic(State(storage): State<Arc<TrafficStorage>>, Path(i
     let result = storage.annotate(&id,p.bookmarked,p.notes.as_deref()).map_err(|e| bad_request(&e.to_string()))?.ok_or_else(|| (StatusCode::NOT_FOUND,Json(ErrorBody { error:"Traffic not found".into() })))?;
     Ok(Json(serde_json::json!({"bookmarked":result.0,"notes":result.1})))
 }
+
+pub async fn delete_traffic(State(storage): State<Arc<TrafficStorage>>, Path(id): Path<String>) -> Result<StatusCode, StatusCode> {
+    match storage.delete(&id).map_err(|e| { tracing::error!("delete_traffic error: {}", e); StatusCode::INTERNAL_SERVER_ERROR })? {
+        true => Ok(StatusCode::NO_CONTENT),
+        false => Err(StatusCode::NOT_FOUND),
+    }
+}

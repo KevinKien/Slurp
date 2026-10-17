@@ -195,7 +195,7 @@ fn tool_definitions() -> Value {
         ("create_replay", "Create a Replay tab, optionally copying a history request by traffic_id. request fields override copied values. Does not send a request.", vec!["workspace"], json!({"traffic_id":{"type":"string"},"name":{"type":"string"},"request":{"type":"object","properties":{"method":{"type":"string"},"url":{"type":"string"},"headers":{"type":"object","additionalProperties":{"type":"string"}},"body":{"type":"string"}}}}), false),
         ("edit_replay", "Edit a Replay request or its tab name. Omitted fields are preserved; headers replaces the complete header object. Does not send.", vec!["workspace","tab_id"], json!({"tab_id":{"type":"integer","minimum":1},"name":{"type":"string"},"request":{"type":"object","properties":{"method":{"type":"string"},"url":{"type":"string"},"headers":{"type":"object","additionalProperties":{"type":"string"}},"body":{"type":"string"}}}}), false),
         ("rename_replay", "Rename a saved Replay tab without changing its request.", vec!["workspace","tab_id","name"], json!({"tab_id":{"type":"integer","minimum":1},"name":{"type":"string","minLength":1,"maxLength":200}}), false),
-        ("send_replay", "Send the saved Replay request to its public HTTPS target (port 443), without redirects; timeout at most 30 seconds, response at most 2 MB. Saves the result to this workspace and updates UI. May change remote data; only send when requested.", vec!["workspace","tab_id"], json!({"tab_id":{"type":"integer","minimum":1},"timeout_ms":{"type":"integer","minimum":1000,"maximum":30000},"max_body_bytes":{"type":"integer","minimum":0}}), false),
+        ("send_replay", "Send the saved Replay request to its HTTP(S) target, including localhost, LAN and custom ports, without redirects; timeout at most 30 seconds, response at most 2 MB. Saves the result to this workspace and updates UI. May change remote data; only send when requested.", vec!["workspace","tab_id"], json!({"tab_id":{"type":"integer","minimum":1},"timeout_ms":{"type":"integer","minimum":1000,"maximum":30000},"max_body_bytes":{"type":"integer","minimum":0}}), false),
     ] {
         let mut props = properties.as_object().unwrap().clone();
         props.insert("workspace".into(), json!({"type":"string","description":"Saved workspace name or id. Temporary sessions do not persist Replay tabs."}));
@@ -379,6 +379,7 @@ mod tests {
         let entry=proxy_core::TrafficEntry::new_request("POST","https://example.com/checkout","example.com","/checkout","https","[]",b"original".to_vec(),None);
         storage.insert_in_workspace(&entry,"default").unwrap();
         let app=Router::new()
+            .route("/local-login",post(|body: String| async move { body }))
             .route("/api/workspaces",get(web_server::api::list_workspaces))
             .route("/api/traffic",get(web_server::api::list_traffic))
             .route("/api/traffic/:id",get(web_server::api::get_traffic))
@@ -388,6 +389,7 @@ mod tests {
             .route("/api/workspaces/:id/replay/tabs/:tab/send",post(web_server::replay::send))
             .with_state(storage);
         let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_url=format!("http://{}/local-login",listener.local_addr().unwrap());
         let backend=Backend::new(&format!("http://{}",listener.local_addr().unwrap()));
         let server=tokio::spawn(async move {axum::serve(listener,app).await.unwrap()});
         let found:Value=serde_json::from_str(&call_tool(&backend,"search_history",&json!({"search":"checkout","workspace":"Default"})).await.unwrap()).unwrap();
@@ -399,8 +401,10 @@ mod tests {
         let tabs:Value=serde_json::from_str(&call_tool(&backend,"list_replay",&json!({"workspace":"default"})).await.unwrap()).unwrap();
         assert_eq!(tabs["tabs"][0]["name"],"MCP test");
         assert_eq!(tabs["tabs"][0]["request"]["body"],"edited");
-        call_tool(&backend,"edit_replay",&json!({"workspace":"default","tab_id":1,"request":{"url":"http://127.0.0.1:1"}})).await.unwrap();
-        assert!(call_tool(&backend,"send_replay",&json!({"workspace":"default","tab_id":1})).await.unwrap_err().to_string().contains("HTTPS"));
+        call_tool(&backend,"edit_replay",&json!({"workspace":"default","tab_id":1,"request":{"url":local_url}})).await.unwrap();
+        let sent:Value=serde_json::from_str(&call_tool(&backend,"send_replay",&json!({"workspace":"default","tab_id":1})).await.unwrap()).unwrap();
+        assert_eq!(sent["response"]["status"],200);
+        assert_eq!(sent["response"]["body"],"edited");
         server.abort();
     }
 

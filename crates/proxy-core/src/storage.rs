@@ -148,6 +148,8 @@ impl TrafficEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum TrafficEvent {
+    #[serde(rename = "entry_deleted")]
+    EntryDeleted { id: String },
     AnnotationChanged { id: String, bookmarked: bool, notes: String },
     /// A new request/response has been captured
     #[serde(rename = "new_entry")]
@@ -717,6 +719,17 @@ impl TrafficStorage {
         }
     }
 
+    /// Delete a single captured entry from its saved or temporary store.
+    pub fn delete(&self, id: &str) -> Result<bool> {
+        for db in [self.lock_db()?, self.lock_mem()?] {
+            if db.execute("DELETE FROM traffic WHERE id = ?1", params![id])? > 0 {
+                let _ = self.tx.send(TrafficEvent::EntryDeleted { id: id.to_owned() });
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Get a single traffic entry by ID, from disk or from the temporary session.
     pub fn get(&self, id: &str) -> Result<Option<TrafficEntry>> {
         for conn in [self.lock_db()?, self.lock_mem()?] {
@@ -1194,6 +1207,28 @@ mod tests {
         assert_eq!(s.target(), Target::Unchosen, "every launch asks for a workspace again");
         drop(s);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn delete_one_entry_in_saved_and_temporary_history() {
+        let s = storage();
+        s.set_active_workspace(DEFAULT_WORKSPACE_ID).unwrap();
+        let saved_entry = entry("http://a/saved");
+        let retained = entry("http://a/retained");
+        s.insert(&saved_entry).unwrap();
+        s.insert(&retained).unwrap();
+        s.use_temporary();
+        let temporary = entry("http://a/temp");
+        s.insert(&temporary).unwrap();
+        let mut events = s.subscribe();
+        assert!(s.delete(&saved_entry.id).unwrap());
+        assert!(matches!(events.try_recv().unwrap(), TrafficEvent::EntryDeleted { id } if id == saved_entry.id));
+        assert!(s.get(&saved_entry.id).unwrap().is_none());
+        assert!(!s.delete(&saved_entry.id).unwrap());
+        assert!(s.get(&retained.id).unwrap().is_some());
+        assert!(s.delete(&temporary.id).unwrap());
+        assert!(s.get(&temporary.id).unwrap().is_none());
+        assert!(s.get(&retained.id).unwrap().is_some());
     }
 
     #[test]

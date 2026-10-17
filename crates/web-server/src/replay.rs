@@ -8,7 +8,7 @@ use proxy_core::{pairs_to_json, TrafficEntry, TrafficEvent, TrafficStorage};
 use serde_json::{json, Value};
 use std::{
     sync::Arc,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 pub static WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -188,7 +188,7 @@ pub async fn edit(
     Ok(Json(result))
 }
 
-// Replay keeps the same public HTTPS restriction as the UI; pin validated DNS addresses.
+// WebSocket Replay retains its public-address policy. HTTP uses http_target.
 pub(crate) fn public_ip(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v) => {
@@ -225,35 +225,14 @@ pub async fn send(
     let request = &resolved;
     validate_request(request)?;
     let url = reqwest::Url::parse(request["url"].as_str().unwrap()).map_err(bad)?;
-    if url.scheme() != "https" || url.port_or_known_default() != Some(443) {
-        return Err(bad("Replay supports public HTTPS on port 443 only"));
-    }
+    super::http_target::validate(&url).map_err(bad)?;
     let host = url.host_str().unwrap();
-    if host.parse::<std::net::IpAddr>().is_ok() || !host.contains('.') {
-        return Err(bad("Expected a public hostname"));
-    }
     let timeout = body["timeout_ms"]
         .as_u64()
         .unwrap_or(15000)
         .clamp(1000, 30000);
     let start = Instant::now();
-    let addresses: Vec<_> =
-        tokio::time::timeout(Duration::from_secs(5), tokio::net::lookup_host((host, 443)))
-            .await
-            .map_err(bad)?
-            .map_err(bad)?
-            .collect();
-    if addresses.is_empty() || addresses.iter().any(|a| !public_ip(a.ip())) {
-        return Err(bad("Host does not resolve exclusively to public addresses"));
-    }
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_millis(timeout))
-        .resolve_to_addrs(host, &addresses)
-        .build()
-        .map_err(bad)?;
+    let client = super::http_target::client(&url, timeout).await.map_err(bad)?;
     let mut outgoing = client.request(
         request["method"]
             .as_str()
@@ -292,7 +271,7 @@ pub async fn send(
         url.as_str(),
         host,
         url.path(),
-        "https",
+        url.scheme(),
         &pairs_to_json(&sent_headers),
         payload.as_bytes().to_vec(),
         None,
@@ -425,6 +404,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn saved_replay_sends_local_http_and_records_actual_scheme() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().route("/login", axum::routing::post(|body: String| async move { body }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let storage = TrafficStorage::new(":memory:", 1024).unwrap();
+        let workspace = storage.create_workspace("Local Replay").unwrap();
+        let tab = create(State(storage.clone()), Path(workspace.id.clone()), Json(json!({
+            "request":{"method":"POST","url":format!("http://{address}/login"),"headers":{},"body":"local payload"}
+        }))).await.unwrap().0;
+        let result = send(State(storage.clone()), Path((workspace.id.clone(), tab["id"].as_u64().unwrap())), Json(json!({"timeout_ms":2000}))).await.unwrap().0;
+        assert_eq!(result["status_code"], 200, "{result}");
+        assert_eq!(result["response_body"], json!(b"local payload".to_vec()));
+        assert_eq!(result["scheme"], "http");
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn sends_history_endpoints_preserve_snapshot_and_scope() {
         let storage=TrafficStorage::new(":memory:",1024).unwrap();
         let template=json!({"method":"GET","url":"https://example.com","headers":{},"body":""});
@@ -504,7 +501,7 @@ mod tests {
         assert_eq!(storage.session().unwrap().workspace_id, Some(other.id));
     }
     #[tokio::test]
-    async fn invalid_edits_do_not_change_saved_tabs_and_private_send_is_rejected() {
+    async fn invalid_edits_do_not_change_saved_tabs() {
         let storage = TrafficStorage::new(":memory:", 1024).unwrap();
         let _ = create(
             State(storage.clone()),
@@ -522,11 +519,6 @@ mod tests {
         .await
         .is_err());
         assert_eq!(load(&storage, "default").unwrap(), before);
-        assert!(
-            send(State(storage), Path(("default".into(), 1)), Json(json!({})))
-                .await
-                .is_err()
-        );
     }
     #[test]
     fn excludes_private_and_reserved_addresses() {

@@ -1,23 +1,29 @@
 #!/usr/bin/env node
-import { spawnSync } from 'node:child_process';
+import { packageMacOS } from './package-macos.mjs';
 import { createHash } from 'node:crypto';
-import { chmodSync, copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
+const options = {};
+for (let i = 0; i < args.length && args[i] !== '--help'; i += 2) {
+  if (!['--input', '--arch'].includes(args[i]) || !args[i + 1] || options[args[i]]) throw new Error('Use --help.');
+  options[args[i]] = args[i + 1];
+}
+const arch = options['--arch'] ?? process.arch;
+if (!['x64', 'arm64'].includes(arch)) throw new Error('Supported architectures: x64, arm64');
+if (arch !== process.arch && process.platform !== 'darwin') throw new Error('--arch is supported only for macOS cross-packaging.');
 if (args.includes('--help')) {
-  console.log('Usage: node scripts/package.mjs [--input standalone-directory]\nPackages a native standalone build: macOS DMG, Linux binary, Windows EXE.');
+  console.log('Usage: node scripts/package.mjs [--input standalone-directory] [--arch x64|arm64]\nPackages a native standalone build: macOS DMG, Linux binary, Windows EXE.');
   process.exit(0);
 }
-if (args.length && (args.length !== 2 || args[0] !== '--input')) throw new Error('Use --help.');
 const platform = { darwin: 'macos', linux: 'linux', win32: 'windows' }[process.platform];
 if (!platform) throw new Error('Unsupported platform');
-const version = readFileSync(join(root, 'crates/cli/Cargo.toml'), 'utf8').match(/^version = "([^"]+)"/m)[1];
-const name = `slurp-${version}-${platform}-${process.arch}`;
-const input = args.length ? resolve(args[1]) : join(root, 'dist', `${name}-standalone`);
+const version = readFileSync(join(root, 'Cargo.toml'), 'utf8').match(/^version = "([^"]+)"/m)[1];
+const name = `slurp-${version}-${platform}-${arch}`;
+const input = options['--input'] ? resolve(options['--input']) : join(root, 'dist', `${name}-standalone`);
 const executable = process.platform === 'win32' ? 'slurp.exe' : 'slurp';
 if (!existsSync(join(input, executable))) throw new Error(`Missing ${join(input, executable)}. Run node scripts/build.mjs first.`);
 const output = join(root, 'dist', 'artifacts');
@@ -25,17 +31,7 @@ mkdirSync(output, { recursive: true });
 const artifact = join(output, name + (process.platform === 'darwin' ? '.dmg' : process.platform === 'win32' ? '.exe' : ''));
 if (existsSync(artifact)) throw new Error(`Output already exists: ${artifact}. Move it aside before packaging.`);
 if (process.platform === 'darwin') {
-  const staging = mkdtempSync(join(tmpdir(), 'slurp-dmg-'));
-  const folder = join(staging, 'Slurp');
-  mkdirSync(folder);
-  copyFileSync(join(input, executable), join(folder, executable));
-  chmodSync(join(folder, executable), 0o755);
-  if (existsSync(join(input, 'README.txt'))) copyFileSync(join(input, 'README.txt'), join(folder, 'README.txt'));
-  writeFileSync(join(folder, 'Start Slurp.command'), '#!/bin/sh\ncd -- "$(dirname -- "$0")" || exit 1\nexec ./slurp\n', { mode: 0o755 });
-  writeFileSync(join(staging, 'INSTALL.txt'), 'Slurp — Sip traffic\n\nCopy the Slurp folder to your Mac, then eject this disk.\nDouble-click Start Slurp.command, or run ./slurp in Terminal.\nThe browser opens automatically. Press Ctrl+C in Terminal to stop.\nThis build is unsigned and not notarized.\n');
-  const result = spawnSync('hdiutil', ['create', '-volname', 'Slurp', '-srcfolder', staging, '-format', 'UDZO', artifact], { stdio: 'inherit' });
-  if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(`hdiutil exited with ${result.status}`);
+  packageMacOS({ root, input, output, name, arch, version, artifact });
 } else {
   copyFileSync(join(input, executable), artifact);
   if (process.platform === 'linux') chmodSync(artifact, 0o755);

@@ -73,8 +73,9 @@ async fn main() -> Result<()> {
     let web_addr = web_listener.local_addr()?;
     let web_storage = storage.clone();
     let web_intercept = intercept.clone();
+    let public_ca = web_server::certificate::PublicCaCertificate(Arc::from(std::fs::read(ca.ca_cert_path())?));
     let web_task = tokio::spawn(async move {
-        web_server::serve(web_listener, web_storage, web_intercept, proxy_control).await
+        web_server::serve(web_listener, web_storage, web_intercept, proxy_control, public_ca).await
     });
 
     // 5. Start proxy server (foreground)

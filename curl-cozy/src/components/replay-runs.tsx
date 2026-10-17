@@ -118,7 +118,7 @@ export function ReplayRuns({
   };
   return (
     <>
-      <Button variant="outline" size="sm" onClick={() => setOpen(true)}>
+      <Button variant="outline" size="sm" className="h-9" onClick={() => setOpen(true)}>
         <History />
         Send history
       </Button>

@@ -68,7 +68,7 @@ On Windows PowerShell:
 curl.exe --proxy http://127.0.0.1:8888 --cacert "$env:USERPROFILE\.slurp\ca.crt" https://httpbin.org/get
 ```
 
-The proxy captures HTTP, HTTPS, WS and WSS traffic; the current Replay sender has separate restrictions, including public HTTPS destinations, no automatic redirects, and bounded response size and timeouts.
+The proxy captures HTTP, HTTPS, WS and WSS traffic. Replay, Scan, Flows, Intruder and Matrix can send HTTP(S) requests to public hosts, localhost and LAN addresses on custom ports. HTTP senders pin DNS results, validate TLS certificates, do not follow redirects, and retain bounded response sizes and timeouts.
 
 ## Certificates and local data
 

@@ -6,6 +6,7 @@ const api = vi.hoisted(() => ({
   fetchTraffic: vi.fn(),
   fetchTrafficDetail: vi.fn(),
   clearTraffic: vi.fn(),
+  deleteTraffic: vi.fn(),
   fetchWorkspaces: vi.fn(),
   createWorkspace: vi.fn(),
   renameWorkspace: vi.fn(),
@@ -37,7 +38,7 @@ vi.mock("@/lib/ws", () => ({ useTrafficStream: () => ({ status: "connected" }) }
 vi.mock("@/lib/replay.functions", () => ({ sendHttpRequest: send }));
 vi.mock("@/components/ui/resizable", () => {
   const Box = ({ children }: { children?: React.ReactNode }) => <div>{children}</div>;
-  return { ResizablePanelGroup: Box, ResizablePanel: Box, ResizableHandle: () => null };
+  return { HistoryPanelGroup: Box, ResizablePanelGroup: Box, ResizablePanel: Box, ResizableHandle: () => null };
 });
 vi.mock("@tanstack/react-start", () => ({ useServerFn: (fn: unknown) => fn }));
 vi.mock("@tanstack/react-router", () => ({ Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a> }));
@@ -284,6 +285,23 @@ const firstHistoryPage = () => ({ data: Array.from({ length: 100 }, (_, i) => hi
 const renderHistory = () => render(<InspectorProvider><SwitchTo id="w2"/><HistoryView/></InspectorProvider>);
 
 describe("HTTP History pagination and virtualization", () => {
+  it("deletes a history request only after the API succeeds", async () => {
+    vi.stubGlobal("DOMRect", {fromRect:({x=0,y=0,width=0,height=0}={})=>({x,y,width,height,top:y,left:x,right:x+width,bottom:y+height})});
+    let deleted = false;
+    api.fetchTraffic.mockImplementation(async()=>({data:deleted?[]:[historyEntry(200)],total:deleted?0:1,next_cursor:null}));
+    api.deleteTraffic.mockRejectedValueOnce(new Error("Delete failed"));
+    renderHistory();
+    const row = (await screen.findByText("/item-200")).closest("tr")!;
+    fireEvent.contextMenu(row);
+    fireEvent.click(await screen.findByRole("menuitem", {name:"Delete request"}));
+    await waitFor(()=>expect(api.deleteTraffic).toHaveBeenCalledWith("history-200"));
+    expect(screen.getByText("/item-200")).toBeInTheDocument();
+    api.deleteTraffic.mockImplementationOnce(async()=>{deleted=true;});
+    fireEvent.contextMenu(row);
+    fireEvent.click(await screen.findByRole("menuitem", {name:"Delete request"}));
+    await waitFor(()=>expect(screen.queryByText("/item-200")).not.toBeInTheDocument());
+  });
+
   it("renders a bounded set of rows and loads the next page near the bottom", async () => {
     api.fetchTraffic.mockImplementation(async (query) => query.cursor
       ? { data: Array.from({ length: 100 }, (_, i) => historyEntry(100-i)), total: 200, next_cursor: null }
@@ -323,12 +341,21 @@ describe("HTTP History pagination and virtualization", () => {
     api.fetchTraffic.mockResolvedValue(firstHistoryPage());
     renderHistory();
     await waitFor(() => expect(screen.getAllByRole("row").length).toBeGreaterThan(2));
+    expect(screen.queryByLabelText("Search traffic")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Search and filter requests" }));
     fireEvent.change(screen.getByLabelText("Search traffic"), { target: { value: "unloaded request" } });
     fireEvent.change(screen.getByLabelText("Filter by method"), { target: { value: "POST" } });
     fireEvent.change(screen.getByLabelText("Filter by status"), { target: { value: "4xx Client error" } });
     await waitFor(() => expect(api.fetchTraffic).toHaveBeenCalledWith(expect.objectContaining({ history: true, search: "unloaded request", method: "POST", status_class: 4 })));
     const query = api.fetchTraffic.mock.calls.find(([q]) => q.search === "unloaded request")![0];
     expect(query.cursor).toBeUndefined();
+    fireEvent.click(screen.getByRole("button", { name: "Close history search" }));
+    expect(screen.queryByLabelText("Search traffic")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Filters active")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Search and filter requests" }));
+    expect(screen.getByLabelText("Search traffic")).toHaveValue("unloaded request");
+    fireEvent.keyDown(screen.getByLabelText("Search traffic"), { key: "Escape" });
+    expect(screen.queryByLabelText("Search traffic")).not.toBeInTheDocument();
   });
 });
 

@@ -161,7 +161,7 @@ function ProfilesWorkspace() {
               />
             </label>
             <label className="block">
-              Allowed origins (one HTTPS origin per line)
+              Allowed origins (one HTTP(S) origin per line)
               <textarea
                 aria-label="Profile allowed origins"
                 placeholder="https://api.example.com"

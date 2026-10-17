@@ -18,3 +18,8 @@ th, td { text-align: left; vertical-align: top; padding: 10px; border-bottom: 1p
 .table { overflow-x: auto; }
 section { margin-top: 36px; }
 ::selection { background: #304e70; color: #fff; }
+.guides { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 16px; margin-top: 28px; }
+.guide { display: block; padding: 20px; border: 1px solid #3b414c; border-radius: 8px; background: #181d25; text-decoration: none; }
+.guide:hover { border-color: #8bc3ff; }
+.guide h2 { margin: 0 0 10px; font-size: 18px; }
+.guide p { margin: 0; color: #c2cbd7; font-size: 14px; }

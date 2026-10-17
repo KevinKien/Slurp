@@ -325,3 +325,7 @@ export interface ProxyLocalInterface { name: string; address: string }
 export async function fetchProxyInterfaces(): Promise<ProxyLocalInterface[]> {
   return apiFetch<ProxyLocalInterface[]>('/api/settings/proxy/interfaces');
 }
+
+export async function deleteTraffic(id: string): Promise<void> {
+  await apiFetch<void>(`/api/traffic/${encodeURIComponent(id)}`, { method: "DELETE" });
+}

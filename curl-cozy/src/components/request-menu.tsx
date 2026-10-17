@@ -2,7 +2,7 @@ import { useOptionalScan } from "@/lib/scan-context";
 import { useIntruder } from "@/lib/intruder-context";
 import type { ReactElement } from "react";
 import { Link } from "@tanstack/react-router";
-import { ArrowUpRight, Copy, ScanLine } from "lucide-react";
+import { ArrowUpRight, Copy, ScanLine, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   ContextMenu,
@@ -22,10 +22,12 @@ export function RequestMenu({
   children,
   disabled = false,
   websocketKind,
+  onDelete,
 }: {
   request: HttpRequest | (() => HttpRequest | Promise<HttpRequest>);
   children: ReactElement;
   disabled?: boolean;
+  onDelete?: () => void | Promise<void>;
   websocketKind?: "text" | "binary";
 }) {
   const { sessions, setSessions, setActive } = useInspector();
@@ -114,6 +116,7 @@ export function RequestMenu({
             Scan
           </Link>
         </ContextMenuItem>
+        {onDelete && <><ContextMenuSeparator /><ContextMenuItem className="gap-2 text-destructive focus:text-destructive" onSelect={()=>{void Promise.resolve().then(onDelete).catch(report);}}><Trash2 className="size-4"/>Delete request</ContextMenuItem></>}
       </ContextMenuContent>
     </ContextMenu>
   );

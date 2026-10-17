@@ -21,7 +21,7 @@ vi.mock("@/lib/replay.functions", () => ({ sendHttpRequest: vi.fn() }));
 // jsdom has no ResizeObserver, which the resizable panels need; plain containers are enough here.
 vi.mock("@/components/ui/resizable", () => {
   const Box = ({ children }: { children?: React.ReactNode }) => <div>{children}</div>;
-  return { ResizablePanelGroup: Box, ResizablePanel: Box, ResizableHandle: () => null };
+  return { HistoryPanelGroup: Box, ResizablePanelGroup: Box, ResizablePanel: Box, ResizableHandle: () => null };
 });
 vi.mock("@tanstack/react-start", () => ({ useServerFn: (fn: unknown) => fn }));
 vi.mock("@tanstack/react-router", () => ({ Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a> }));

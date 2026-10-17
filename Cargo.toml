@@ -7,6 +7,9 @@ members = [
     "crates/cli",
 ]
 
+[workspace.package]
+version = "1.0.1"
+
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
 hyper = { version = "1", features = ["full"] }

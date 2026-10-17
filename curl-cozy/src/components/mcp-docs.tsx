@@ -48,7 +48,7 @@ const TOOLS: { name: string; summary: string; params: string; destructive?: bool
   { name: 'create_replay', summary: 'Create a Replay tab from history or a custom request.', params: 'workspace, traffic_id, name, request' },
   { name: 'edit_replay', summary: 'Edit method, URL, headers, body or tab name.', params: 'workspace, tab_id, request, name' },
   { name: 'rename_replay', summary: 'Rename a Replay tab.', params: 'workspace, tab_id, name' },
-  { name: 'send_replay', summary: 'Send a saved request to a public HTTPS target; save and display the response.', params: 'workspace, tab_id, timeout_ms, max_body_bytes' },
+  { name: 'send_replay', summary: 'Send a saved request to an HTTP(S) target, including localhost and LAN; save and display the response.', params: 'workspace, tab_id, timeout_ms, max_body_bytes' },
   { name: 'clear_traffic', summary: 'Permanently delete traffic: one workspace, or everything when omitted.', params: 'workspace', destructive: true },
 ];
 

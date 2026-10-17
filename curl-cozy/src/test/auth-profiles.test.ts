@@ -93,6 +93,7 @@ describe("profile requests", () => {
   it("validates profile origins, headers and variable sizes", () => {
     const profile = { ...newProfile(), origins: ["https://api.example.com"] };
     expect(() => validateProfiles({ profiles: [profile], active: profile.id })).not.toThrow();
+    expect(() => validateProfiles({ profiles: [{ ...profile, origins: ["http://localhost:8088", "http://192.168.1.10:3000"] }], active: profile.id })).not.toThrow();
     expect(() =>
       validateProfiles({ profiles: [{ ...profile, headers: { Cookie: "x=1" } }], active: null }),
     ).toThrow();

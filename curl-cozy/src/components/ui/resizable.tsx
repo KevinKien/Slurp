@@ -1,5 +1,5 @@
 import { GripVertical } from "lucide-react";
-import { Group, Panel, Separator } from "react-resizable-panels";
+import { Group, Panel, Separator, useDefaultLayout } from "react-resizable-panels";
 
 import { cn } from "@/lib/utils";
 
@@ -35,3 +35,16 @@ const ResizableHandle = ({
 );
 
 export { ResizablePanelGroup, ResizablePanel, ResizableHandle };
+
+// Stable panel ids let the library restore proportions after route changes/reloads.
+const layoutStorage = {
+  getItem(key: string) { try { return localStorage.getItem(key); } catch { return null; } },
+  setItem(key: string, value: string) { try { localStorage.setItem(key, value); } catch {} },
+};
+export function HistoryPanelGroup({ children }: { children: React.ReactNode }) {
+  const { defaultLayout, onLayoutChanged } = useDefaultLayout({
+    id: "slurp-history-vertical", panelIds: ["history-list", "history-details"],
+    storage: layoutStorage, onlySaveAfterUserInteractions: true,
+  });
+  return <ResizablePanelGroup orientation="vertical" defaultLayout={defaultLayout} onLayoutChanged={onLayoutChanged}>{children}</ResizablePanelGroup>;
+}

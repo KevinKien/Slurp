@@ -2,29 +2,26 @@
 
 **Sip traffic.**
 
-Thiết kế một ứng dụng web HTTP Traffic Inspector & Replay Client với giao diện dark mode chuyên nghiệp lấy cảm hứng từ Caido (theo ảnh đính kèm).
+Slurp is an HTTP traffic inspector and replay client with a dark interface inspired by Caido.
 
-Các tính năng chính:
-1. Giao diện tổng quan (phong cách Caido):
-- Sidebar bên trái điều hướng: HTTP History, Replay (Repeater), Scope/Filters, Settings.
-- Dark theme hiện đại, tinh gọn với font monospace cho code, status code badge (xanh lá cho 2xx, vàng cho 3xx, đỏ cho 4xx/5xx).
+Main features:
 
-2. Tab HTTP History:
-- Bảng hiển thị danh sách traffic: ID, Method, Host, Path, Status, Size, Response Time, Timestamp.
-- Thanh tìm kiếm và bộ lọc nhanh (theo Method GET/POST/PUT..., Status code, Path hoặc từ khóa).
-- Khung xem chi tiết Request và Response chia đôi (Split pane) ở nửa dưới màn hình với các tab Raw, Pretty (định dạng JSON/HTML/Text), và Headers.
-- Nút "Send to Replay" trên mỗi request để chuyển dữ liệu sang chế độ chỉnh sửa và gửi lại.
-
-3. Tab Replay (Repeater):
-- Quản lý nhiều phiên làm việc theo tab (Sessions).
-- Trình tùy chỉnh request: chọn Method, nhập URL, chỉnh sửa Headers, Query Parameters và Request Body (JSON/Raw).
-- Hỗ trợ dán trực tiếp câu lệnh cURL để tự động điền form.
-- Nút "Send" để gửi request và hiển thị kết quả Response trả về ngay bên cạnh (Status code, Duration, Response Headers, Response Body formatted).
-
-4. Quản lý dữ liệu & Import:
-- Có sẵn bộ dữ liệu mẫu (mock traffic) phong phú khi mở app lần đầu để trải nghiệm ngay.
-- Tính năng Import file HAR, cURL hoặc file JSON để nạp thêm traffic logs vào lịch sử.
-- Nút Clear history và Export log.
+1. Interface:
+   - Sidebar navigation for Dashboard, Intercept, HTTP History, Replay, Flows, Scope & Filters, Tools, and Settings.
+   - A dark theme, monospace request editors, and status badges: green for 2xx, yellow for 3xx, and red for 4xx/5xx.
+2. HTTP History:
+   - A traffic table with ID, method, host, path, status, size, response time, and timestamp.
+   - Search and filters for method, status, path, and keywords, available through the search icon.
+   - Request and response viewers with Raw, Pretty, and Headers modes. The vertical split remembers its size.
+   - Context menu actions to send a request to Replay, copy cURL, scan, or delete the request.
+3. Replay:
+   - Multiple request tabs.
+   - Editable methods, URLs, headers, query parameters, and JSON or raw request bodies.
+   - Import from cURL, Postman collections, and Bruno files.
+   - Send requests and inspect response status, duration, headers, and formatted bodies side by side.
+4. Data and import:
+   - Capture real traffic or import HAR and JSON logs. The app starts without mock traffic.
+   - Clear history or export loaded requests as JSON or HAR.
 
 This project was built with [Lovable](https://lovable.dev).
 
