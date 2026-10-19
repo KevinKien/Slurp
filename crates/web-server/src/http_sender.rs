@@ -132,6 +132,29 @@ mod tests {
         assert_eq!(result["responseBody"], "redirect");
         server.abort();
     }
+    #[tokio::test]
+    async fn sends_options_trace_and_keeps_forwarding_header_restrictions() {
+        use axum::{http::{HeaderMap, Method}, routing::any, Router};
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address=listener.local_addr().unwrap();
+        let app=Router::new().route("/probe",any(|method:Method,headers:HeaderMap|async move {
+            assert!(!headers.contains_key("x-forwarded-for"));
+            assert!(!headers.contains_key("forwarded"));
+            if method==Method::OPTIONS { return ([("allow","GET, OPTIONS, TRACE")],"options".to_string()); }
+            assert_eq!(method,Method::TRACE);
+            ([("allow","GET, OPTIONS, TRACE")],format!("TRACE /probe HTTP/1.1\r\nX-Slurp-Probe: {}\r\n",headers["x-slurp-probe"].to_str().unwrap()))
+        }));
+        let server=tokio::spawn(async move {axum::serve(listener,app).await.unwrap();});
+        for method in ["OPTIONS","TRACE"] {
+            let data=json!({"method":method,"url":format!("http://{address}/probe"),"headers":{"X-Slurp-Probe":"fixture-marker","X-Forwarded-For":"127.0.0.1","Forwarded":"for=127.0.0.1"},"body":"","timeout":2000});
+            let result=send(Json(data)).await.0;
+            assert_eq!(result["ok"],true,"{result}");
+            assert_eq!(result["status"],200);
+            if method=="TRACE" {assert!(result["responseBody"].as_str().unwrap().contains("fixture-marker"));}
+        }
+        assert!(validate(&json!({"method":"CONNECT","url":format!("http://{address}/probe"),"headers":{},"body":"","timeout":2000})).is_err());
+        server.abort();
+    }
     #[test]
     fn accepts_http_local_lan_and_custom_ports_but_rejects_invalid_input() {
         for url in ["ftp://example.com", "file:///tmp/a", "https://u:p@example.com", "http://localhost:0"] {
@@ -230,6 +253,7 @@ mod tests {
     }
     #[tokio::test]
     async fn decodes_captured_accept_encoding_and_bounds_decoded_bytes() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         for (kind, oversized) in [
             ("gzip", false),

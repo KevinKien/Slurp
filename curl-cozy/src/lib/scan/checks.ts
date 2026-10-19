@@ -1,3 +1,12 @@
+import { dependencyAudit } from "./dependency-checks";
+import { tokenGraphqlChecks } from "./token-graphql-checks";
+import { protocolChecks } from "./protocol-checks";
+import { injectionChecks } from "./injection-checks";
+import { browserChecks } from "./browser-checks";
+import { oastChecks } from "./oast-checks";
+import { httpChecks } from "./http-checks";
+import { passiveChecks } from "./passive-checks";
+import { extendedChecks } from "./extended-checks";
 import type { CheckOutput, Exchange, ScanCheck, ScanCheckContext } from "./types";
 import { mutateParameter, withHeader } from "./parameters";
 const header = (x: Exchange, name: string) =>
@@ -292,6 +301,22 @@ const cors: ScanCheck = {
       );
     if (!responses.every(good))
       return empty("CORS probe did not return successful responses.", true);
+    if (responses.every((e) => header(e, "access-control-allow-origin").trim() === "*")) {
+      return {
+        message: "Wildcard CORS observed; review whether data is public.",
+        findings: [
+          candidate({
+            title: "Wildcard CORS policy accepts untrusted origins",
+            severity: "low",
+            status: "needs_review",
+            summary:
+              "Both untrusted-Origin probes returned Access-Control-Allow-Origin: *. Public resources may intentionally allow this. Browsers reject wildcard ACAO with credentialed access; data sensitivity and browser behavior require review.",
+            evidenceIds: responses.map((e) => e.evidence.id),
+            excerpts: ["Access-Control-Allow-Origin: *"],
+          }),
+        ],
+      };
+    }
     if (
       !responses.every(
         (e, i) =>
@@ -329,12 +354,22 @@ const cors: ScanCheck = {
   },
 };
 export const scanChecks: ReadonlyArray<ScanCheck> = [
+  dependencyAudit,
+  ...tokenGraphqlChecks,
+  ...protocolChecks,
+  ...oastChecks,
+  ...browserChecks,
+  ...extendedChecks.filter((check) => !check.active),
+  ...passiveChecks,
   cookieFlags,
   errors,
   headers,
   reflection,
   inputErrors,
   cors,
+  ...httpChecks,
+  ...injectionChecks,
+  ...extendedChecks.filter((check) => check.active),
 ];
 export function getScanCheck(id: string) {
   const check = scanChecks.find((c) => c.id === id);

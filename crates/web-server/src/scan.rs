@@ -37,16 +37,36 @@ fn strings(value: &Value, count: usize, len: usize) -> bool {
         v.len() <= count && v.iter().all(|s| s.as_str().is_some_and(|s| s.len() <= len))
     })
 }
+fn script_urls(value: &Value) -> bool {
+    value.as_array().is_some_and(|urls| {
+        urls.len() <= 16 && urls.iter().all(|v| {
+            v.as_str().is_some_and(|s| {
+                s.len() <= 4096 && reqwest::Url::parse(s).is_ok_and(|url| {
+                    super::http_target::validate(&url).is_ok() && url.fragment().is_none()
+                })
+            })
+        })
+    })
+}
 fn check_id(value: &Value) -> bool {
     matches!(
         value.as_str(),
         Some(
             "cookie-flags"
+                | "403-bypass" | "dependency-audit" | "jwt-signature" | "graphql-introspection" | "graphql-batching" | "http-framing"
+                | "browser-xss" | "dom-xss" | "dom-interaction" | "oast-ssrf" | "oast-xxe"
                 | "error-disclosure"
                 | "security-headers"
                 | "reflection"
                 | "input-errors"
                 | "cors"
+                | "noauthen"
+                | "js-endpoints"
+                | "js-secrets"
+                | "sql-boolean" | "sql-time" | "header-injection" | "auth-access" | "referer-access" | "client-ip" | "url-override" | "http-methods"
+                | "command-injection" | "code-injection" | "el-injection" | "ldap-injection" | "xpath-injection" | "xml-injection" | "xml-entity" | "xxe" | "xml-injection-body" | "xml-entity-body" | "xxe-body"
+                | "cookie-audit" | "disclosure-audit" | "policy-audit"
+                | "passive-audit" | "sql-injection" | "ssti" | "path-traversal" | "open-redirect"
         )
     )
 }
@@ -61,23 +81,25 @@ pub fn validate_run(id: &str, run: &Value) -> Result<(), Error> {
             run["status"].as_str(),
             Some("completed" | "stopped" | "failed")
         )
-        || !number(&run["sent"], 100)
+        || !number(&run["sent"], 9_007_199_254_740_991)
         || run.to_string().len() > 12_000_000
     {
         return Err(bad(
-            "Invalid or unfinished scan run (maximum 12 MB / 100 requests)",
+            "Invalid or unfinished scan run (maximum 12 MB)",
         ));
     }
     crate::replay::validate_request(&run["plan"]["request"])?;
-    if !matches!(run["plan"]["mode"].as_str(), Some("passive" | "active")) {
+    if !matches!(run["plan"]["mode"].as_str(), Some("passive" | "active" | "both")) {
         return Err(bad("Invalid scan mode"));
     }
-    if run["plan"]["mode"] == "passive" && run["sent"] != 0 {
-        return Err(bad("Passive scans cannot send requests"));
+    if run["plan"]["mode"] == "passive"
+        && (run["sent"].as_u64().unwrap_or(u64::MAX) > 1
+            || (run["sent"] == 1 && run["plan"]["allowSending"] != true))
+    {
+        return Err(bad("Passive scans may fetch one response only"));
     }
     let evidence = run["evidence"]
         .as_array()
-        .filter(|v| v.len() <= 101)
         .ok_or_else(|| bad("Invalid evidence list"))?;
     let mut ids = HashSet::new();
     for e in evidence {
@@ -95,6 +117,37 @@ pub fn validate_run(id: &str, run: &Value) -> Result<(), Error> {
             return Err(bad("Invalid scan evidence"));
         }
         crate::replay::validate_request(&e["request"])?;
+        for (field, limit) in [("rawRequest",16000),("rawResponse",32000)] {
+            if let Some(raw) = e.get(field) { if !text(raw,limit) { return Err(bad("Invalid raw protocol evidence")); } }
+        }
+        if let Some(browser) = e.get("browser") {
+            let valid = browser.as_array().is_some_and(|observations| {
+                observations.len() <= 500 && observations.iter().all(|o| {
+                    o["executed"].is_boolean() && text(&o["marker"], 100)
+                        && text(&o["url"], 12000) && text(&o["browser"], 200)
+                        && strings(&o["sinks"], 12, 100)
+                        && o.get("interactions").is_none_or(|v|strings(v,16,800))
+                        && strings(&o["cspViolations"], 6, 2000)
+                        && o.get("requestedScripts").is_none_or(|v| script_urls(v))
+                        && number(&o["blockedRequests"], 9_007_199_254_740_991)
+                        && o.get("sinkTraces").is_none_or(|v| v.as_array().is_some_and(|traces| {
+                            traces.len() <= 12 && traces.iter().all(|t| text(&t["sink"],100)
+                                && t["value"].as_str().is_some_and(|s|s.len()<=2000)
+                                && t["stack"].as_str().is_some_and(|s|s.len()<=6000))
+                        }))
+                })
+            });
+            if !valid { return Err(bad("Invalid browser evidence")); }
+        }
+        if let Some(probes) = e.get("oast") {
+            if !probes.as_array().is_some_and(|probes|probes.len()<=4 && probes.iter().all(|p| {
+                text(&p["id"],100) && text(&p["url"],4096) && text(&p["expiresAt"],100)
+                    && p.get("dnsName").is_none_or(|v|text(v,253))
+                    && p["events"].as_array().is_some_and(|events|events.len()<=16 && events.iter().all(|v| {
+                        matches!(v["protocol"].as_str(),Some("http"|"dns")) && text(&v["timestamp"],100) && text(&v["peer"],100) && text(&v["detail"],2000)
+                    }))
+            })) { return Err(bad("Invalid OAST evidence")); }
+        }
         if let Some(response) = e.get("response") {
             if response["status"]
                 .as_u64()
@@ -114,13 +167,33 @@ pub fn validate_run(id: &str, run: &Value) -> Result<(), Error> {
     }
     let refs = |value: &Value| {
         value.as_array().is_some_and(|v| {
-            v.len() <= 101
+            v.len() <= evidence.len()
                 && v.iter()
                     .all(|id| id.as_str().is_some_and(|id| ids.contains(id)))
         })
     };
     if !refs(&run["baselineIds"]) {
         return Err(bad("Unknown baseline evidence reference"));
+    }
+    if let Some(audits) = run.get("domAudits") {
+        let valid = audits.as_array().is_some_and(|audits| audits.len() <= 10 && audits.iter().all(|a| {
+            text(&a["id"],100) && text(&a["url"],12000) && strings(&a["notes"],40,4000)
+                && a.get("runtimeScripts").is_none_or(|v| script_urls(v))
+                && a["scripts"].as_array().is_some_and(|scripts| scripts.len()<=116 && scripts.iter().all(|s| {
+                    text(&s["url"],12000) && s["evidenceId"].as_str().is_some_and(|id|ids.contains(id))
+                        && strings(&s["sources"],30,4000) && strings(&s["sinks"],30,4000) && s["parsed"].is_boolean()
+                }))
+                && a["candidates"].as_array().is_some_and(|candidates| candidates.len()<=40 && candidates.iter().all(|c| {
+                    text(&c["id"],100) && text(&c["script"],12000) && text(&c["sink"],4000)
+                        && number(&c["line"],1_000_000) && number(&c["column"],1_000_000)
+                        && text(&c["excerpt"],4000) && strings(&c["families"],10,100)
+                        && matches!(c["context"].as_str(),Some("html"|"script"|"url"))
+                        && matches!(c["source"]["kind"].as_str(),Some("fragment"|"query"|"url"|"input"|"unsupported"))
+                        && text(&c["source"]["label"],4000) && c["source"]["decoded"].is_boolean() && c["source"]["base64"].is_boolean()
+                        && c["source"].get("name").is_none_or(|v|v.as_str().is_some_and(|s|s.len()<=1000))
+                }))
+        }));
+        if !valid { return Err(bad("Invalid DOM script audit")); }
     }
     let findings = run["findings"]
         .as_array()
@@ -172,7 +245,7 @@ pub fn validate_run(id: &str, run: &Value) -> Result<(), Error> {
     }
     let checks = run["checks"]
         .as_array()
-        .filter(|v| v.len() <= 100)
+        .filter(|v| v.len() <= 400)
         .ok_or_else(|| bad("Invalid check results"))?;
     for check in checks {
         if !check_id(&check["checkId"])
@@ -227,9 +300,9 @@ pub async fn list_runs(
     Path(workspace): Path<String>,
     Query(page): Query<Page>,
 ) -> Result<Json<Value>, Error> {
-    storage
-        .get_intruder_document(&workspace)
-        .map_err(storage_error)?;
+    if workspace != proxy_core::storage::TEMP_WORKSPACE_ID {
+        storage.get_intruder_document(&workspace).map_err(storage_error)?;
+    }
     let offset = page.offset.unwrap_or(0);
     if offset > 1_000_000 {
         return Err(bad("Invalid pagination offset"));
@@ -259,9 +332,9 @@ pub async fn list_findings(
     Path(workspace): Path<String>,
     Query(query): Query<FindingQuery>,
 ) -> Result<Json<Value>, Error> {
-    storage
-        .get_intruder_document(&workspace)
-        .map_err(storage_error)?;
+    if workspace != proxy_core::storage::TEMP_WORKSPACE_ID {
+        storage.get_intruder_document(&workspace).map_err(storage_error)?;
+    }
     let offset = query.offset.unwrap_or(0);
     let q = query.q.unwrap_or_default();
     let status = query.status.unwrap_or_default();
@@ -291,6 +364,132 @@ mod tests {
     use super::*;
     fn run() -> Value {
         json!({"version":1,"id":"scan-1","startedAt":"2026-10-16T00:00:00Z","finishedAt":"2026-10-16T00:00:01Z","status":"completed","sent":0,"plan":{"mode":"passive","request":{"method":"GET","url":"https://example.com/items","headers":{},"body":""}},"baselineIds":["e1"],"evidence":[{"id":"e1","label":"Observed response","timestamp":"2026-10-16T00:00:00Z","request":{"method":"GET","url":"https://example.com/items","headers":{},"body":""},"truncated":false,"size":2,"duration":1,"setCookies":[],"response":{"status":200,"responseHeaders":{},"responseBody":"ok"}}],"findings":[{"id":"f1","fingerprint":"cookie-flags:sid:secure","checkId":"cookie-flags","title":"Cookie lacks Secure","severity":"low","confidence":"high","status":"verified","summary":"Missing attribute observed","evidenceIds":["e1"],"excerpts":["sid=<redacted>"],"remediation":"Set Secure","verification":{"method":"response inspection","outcome":"confirmed","reason":"Observed directly"}}],"checks":[{"checkId":"cookie-flags","status":"findings","message":"Observed missing flag","findingIds":["f1"]}]})
+    }
+    #[test]
+    fn passive_scan_can_save_one_authorized_response_fetch() {
+        let mut value = run();
+        value["sent"] = json!(1);
+        assert!(validate_run("scan-1", &value).is_err());
+        value["plan"]["allowSending"] = json!(true);
+        validate_run("scan-1", &value).unwrap();
+        value["sent"] = json!(2);
+        assert!(validate_run("scan-1", &value).is_err());
+    }
+    #[test]
+    fn accepts_new_passive_modules_and_preserves_policy_snapshot() {
+        for check in ["cookie-audit", "disclosure-audit", "policy-audit"] {
+            let mut value=run();
+            value["checks"][0]["checkId"]=json!(check);
+            value["findings"][0]["checkId"]=json!(check);
+            value["plan"]["policy"]=json!({"maxImpact":"passive","allowIntrusive":false,"includeExperimental":false,"maxDurationMs":300000,"requestTimeoutMs":15000});
+            validate_run("scan-1", &value).unwrap();
+        }
+    }
+    #[test]
+    fn accepts_phase_four_injection_evidence() {
+        for check in ["command-injection", "code-injection", "el-injection", "ldap-injection", "xpath-injection", "xml-injection", "xml-entity", "xxe", "xml-injection-body", "xml-entity-body", "xxe-body"] {
+            let mut value = run();
+            value["plan"]["mode"] = json!("active");
+            value["checks"][0]["checkId"] = json!(check);
+            value["findings"][0]["checkId"] = json!(check);
+            value["findings"][0]["status"] = json!("needs_review");
+            validate_run("scan-1", &value).unwrap();
+        }
+    }
+    #[test]
+    fn validates_new_security_checks_and_bounded_raw_evidence() {
+        for id in ["jwt-signature","graphql-introspection","graphql-batching","http-framing","dependency-audit"] {
+            let mut value=run();
+            value["checks"][0]["checkId"]=json!(id);
+            value["findings"][0]["checkId"]=json!(id);
+            value["evidence"][0]["rawRequest"]=json!("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n");
+            value["evidence"][0]["rawResponse"]=json!("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            validate_run("scan-1",&value).unwrap();
+            value["evidence"][0]["rawRequest"]=json!("x".repeat(16001));
+            assert!(validate_run("scan-1",&value).is_err());
+        }
+    }
+    #[test]
+    fn validates_phase_five_browser_evidence() {
+        for id in ["browser-xss", "dom-xss"] {
+            let mut value = run();
+            value["plan"]["mode"] = json!("active");
+            value["checks"][0]["checkId"] = json!(id);
+            value["findings"][0]["checkId"] = json!(id);
+            value["evidence"][0]["browser"] = json!([{
+                "executed":true,"marker":"slurpMarker12345678","url":"https://example.com/items#payload",
+                "sinks":["innerHTML"],"cspViolations":[],"blockedRequests":2,"browser":"Chrome/fixture"
+            }]);
+            validate_run("scan-1", &value).unwrap();
+            value["evidence"][0]["browser"][0]["executed"] = json!("yes");
+            assert!(validate_run("scan-1", &value).is_err());
+        }
+    }
+    #[test]
+    fn validates_dom_audit_and_runtime_trace_references() {
+        let mut value=run();
+        value["domAudits"]=json!([{"id":"audit-1","url":"https://example.com/items","notes":[],"scripts":[{
+            "url":"https://example.com/app.js","evidenceId":"e1","sources":["location.hash"],"sinks":["innerHTML"],"parsed":true
+        }],"candidates":[{"id":"candidate-1","script":"https://example.com/app.js","line":1,"column":1,"sink":"innerHTML","context":"html","excerpt":"el.innerHTML=location.hash","families":["html-element"],"source":{"kind":"fragment","label":"location.hash","decoded":true,"base64":false}}]}]);
+        value["evidence"][0]["browser"]=json!([{"executed":true,"marker":"slurp1234567890123456","url":"https://example.com/items#x","sinks":["innerHTML"],"cspViolations":[],"blockedRequests":0,"browser":"Chrome/fixture","sinkTraces":[{"sink":"innerHTML","value":"marker","stack":"https://example.com/app.js:1"}]}]);
+        validate_run("scan-1", &value).unwrap();
+        value["domAudits"][0]["scripts"][0]["evidenceId"]=json!("missing");
+        assert!(validate_run("scan-1", &value).is_err());
+        value["domAudits"][0]["scripts"][0]["evidenceId"]=json!("e1");
+        value["evidence"][0]["browser"][0]["sinkTraces"][0]["value"]=json!("x".repeat(2001));
+        assert!(validate_run("scan-1", &value).is_err());
+    }
+    #[test]
+    fn validates_runtime_dependency_evidence() {
+        let mut value = run();
+        value["evidence"][0]["browser"] = json!([{
+            "executed":false,"marker":"slurpMarker12345678","url":"https://example.com/items",
+            "sinks":[],"cspViolations":[],"blockedRequests":1,"browser":"Chrome/fixture",
+            "requestedScripts":["https://example.com/lazy.js"]
+        }]);
+        value["domAudits"] = json!([{"id":"audit-1","url":"https://example.com/items","notes":[],"scripts":[],"candidates":[],"runtimeScripts":["https://example.com/lazy.js"]}]);
+        validate_run("scan-1", &value).unwrap();
+        for invalid in [json!(["file:///etc/passwd"]),json!(["https://user:secret@example.com/app.js"]),json!(vec!["https://example.com/app.js";17])] {
+            value["evidence"][0]["browser"][0]["requestedScripts"] = invalid;
+            assert!(validate_run("scan-1", &value).is_err());
+        }
+        value["evidence"][0]["browser"][0]["requestedScripts"] = json!([]);
+        value["domAudits"][0]["runtimeScripts"] = json!(["javascript:alert(1)"]);
+        assert!(validate_run("scan-1", &value).is_err());
+    }
+    #[test]
+    fn validates_interaction_and_oast_evidence() {
+        let mut value=run();
+        for check in ["dom-interaction","oast-ssrf","oast-xxe"] {
+            value["plan"]["checks"]=json!([check]);
+            value["plan"]["mode"]=json!("active");
+            value["checks"][0]["checkId"]=json!(check);
+            value["findings"][0]["checkId"]=json!(check);
+            validate_run("scan-1",&value).unwrap();
+        }
+        value["evidence"][0]["oast"]=json!([{"id":"probe-1","url":"http://oast.example.test/slurp-oast/probe-1","expiresAt":"2026-10-19T00:10:00Z","events":[{"protocol":"http","timestamp":"2026-10-19T00:00:00Z","peer":"127.0.0.1","detail":"GET /slurp-oast/probe-1"}]}]);
+        value["evidence"][0]["browser"]=json!([{"executed":true,"marker":"slurpMarker12345678","url":"https://example.com/items","sinks":[],"cspViolations":[],"blockedRequests":0,"browser":"Chrome/fixture","interactions":["fill/input/change INPUT#search"]}]);
+        validate_run("scan-1",&value).unwrap();
+        value["evidence"][0]["oast"][0]["events"][0]["protocol"]=json!("invalid");
+        assert!(validate_run("scan-1",&value).is_err());
+        value["evidence"][0]["oast"][0]["events"][0]["protocol"]=json!("dns");
+        value["evidence"][0]["browser"][0]["interactions"]=json!(vec!["click";17]);
+        assert!(validate_run("scan-1",&value).is_err());
+    }
+    #[test]
+    fn accepts_runs_beyond_the_old_request_and_result_limits() {
+        let mut value = run();
+        value["plan"]["mode"] = json!("active");
+        value["sent"] = json!(130);
+        let template = value["evidence"][0].clone();
+        value["evidence"] = json!((1..=130).map(|i| {
+            let mut item = template.clone();
+            item["id"] = json!(format!("e{i}"));
+            item
+        }).collect::<Vec<_>>());
+        let check = value["checks"][0].clone();
+        value["checks"] = json!(vec![check; 150]);
+        validate_run("scan-1", &value).unwrap();
     }
     #[tokio::test]
     async fn dashboard_findings_are_scoped_filtered_and_paginated() {

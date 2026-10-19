@@ -17,7 +17,7 @@ The standalone executable serves both the web UI and API. No Node.js runtime is 
 - **Flows:** chain API requests into workflows and pass response values between steps.
 - **Profiles, Response Diff and Authorization Matrix:** manage account variables, headers and cookies, compare responses, and test access across accounts.
 - **Intruder:** substitute payloads with configurable concurrency, rate limits, response matching and saved results.
-- **Scan Dashboard:** monitor scan tasks and review findings with their supporting evidence.
+- **Scan Dashboard:** monitor tasks and findings, automatically audit captured APIs for missing authentication and permissive CORS, and passively discover endpoints and suspected credentials in captured JavaScript. Review evidence and pause automatic auditing from the dashboard. Manual scans use reusable Passive/Active profiles, time/rate controls and a coverage catalog. Experimental active modules cover controlled command/code/EL, LDAP/XPath/XML and local-file XXE probes, with intrusive checks explicitly selected in profiles.
 - **Scope & Filters:** focus History and Intercept on configured target domains.
 - **Utilities:** Base64, URL, HTML and hex encoding/decoding, UUID generation, and JWT decoding.
 - **Workspaces:** organize saved traffic, Replay tabs and testing data locally.

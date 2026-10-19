@@ -150,6 +150,8 @@ impl TrafficEntry {
 pub enum TrafficEvent {
     #[serde(rename = "entry_deleted")]
     EntryDeleted { id: String },
+    #[serde(rename = "scan_changed")]
+    ScanChanged { workspace_id: String },
     AnnotationChanged { id: String, bookmarked: bool, notes: String },
     /// A new request/response has been captured
     #[serde(rename = "new_entry")]
@@ -492,6 +494,7 @@ impl TrafficStorage {
 
         let mem = Connection::open_in_memory()?;
         mem.execute_batch(TRAFFIC_TABLE)?;
+        mem.execute_batch("CREATE TABLE scan_runs (workspace_id TEXT NOT NULL,id TEXT NOT NULL,started_at TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(workspace_id,id)); CREATE INDEX idx_scan_runs_time ON scan_runs(workspace_id,started_at DESC);")?;
         mem.execute_batch(crate::websocket::SCHEMA)?;
         mem.execute_batch("CREATE INDEX IF NOT EXISTS idx_traffic_timestamp ON traffic(timestamp); CREATE INDEX IF NOT EXISTS idx_traffic_cursor ON traffic(timestamp, id); CREATE INDEX IF NOT EXISTS idx_traffic_workspace_cursor ON traffic(workspace_id, timestamp, id);")?;
 
@@ -1563,29 +1566,80 @@ mod intruder_tests {
 
 impl TrafficStorage {
     pub fn put_scan_run(&self,workspace:&str,id:&str,data:&serde_json::Value)->Result<(),WorkspaceError>{
-        let mut db=self.lock_db().map_err(WorkspaceError::Other)?;let tx=db.transaction()?;
-        if !tx.prepare("SELECT 1 FROM workspaces WHERE id=?1")?.exists(params![workspace])? {return Err(WorkspaceError::NotFound);}
+        let mut db=self.lock_for(Some(workspace)).map_err(WorkspaceError::Other)?;let tx=db.transaction()?;
+        if workspace != TEMP_WORKSPACE_ID && !tx.prepare("SELECT 1 FROM workspaces WHERE id=?1")?.exists(params![workspace])? {return Err(WorkspaceError::NotFound);}
         let serialized=data.to_string();
         let old:Option<String>=tx.query_row("SELECT data FROM scan_runs WHERE workspace_id=?1 AND id=?2",params![workspace,id],|r|r.get(0)).optional()?;
         if old.is_some_and(|value|value!=serialized){return Err(WorkspaceError::Other(anyhow::anyhow!("Scan evidence is immutable")));}
-        tx.execute("INSERT OR IGNORE INTO scan_runs(workspace_id,id,started_at,data) VALUES(?1,?2,?3,?4)",params![workspace,id,data["startedAt"].as_str().unwrap_or(""),serialized])?;tx.commit()?;Ok(())
+        tx.execute("INSERT OR IGNORE INTO scan_runs(workspace_id,id,started_at,data) VALUES(?1,?2,?3,?4)",params![workspace,id,data["startedAt"].as_str().unwrap_or(""),serialized])?;tx.commit()?;drop(db);self.publish(TrafficEvent::ScanChanged { workspace_id:workspace.into() });Ok(())
+    }
+    /// Persist only newly discovered automatic JS findings, atomically per workspace.
+    /// Existing immutable reports remain available; duplicate-only captures add no run.
+    pub fn put_unique_js_scan_run(&self, workspace: &str, id: &str, data: &serde_json::Value) -> Result<bool, WorkspaceError> {
+        fn key(f: &serde_json::Value) -> String {
+            if f["checkId"] == "js-endpoints" {
+                let excerpts = f["excerpts"].as_array();
+                let field = |prefix: &str| excerpts.and_then(|v| v.iter().filter_map(|s| s.as_str()).find(|s| s.starts_with(prefix))).unwrap_or("").to_owned();
+                // Also recognizes old reports whose fingerprints used sequential IDs.
+                return serde_json::json!(["js-endpoints", field("Method:"), field("Endpoint candidate:")]).to_string();
+            }
+            f["fingerprint"].as_str().unwrap_or("").to_owned()
+        }
+        let mut db = self.lock_for(Some(workspace)).map_err(WorkspaceError::Other)?;
+        let tx = db.transaction()?;
+        if workspace != TEMP_WORKSPACE_ID && !tx.prepare("SELECT 1 FROM workspaces WHERE id=?1")?.exists(params![workspace])? { return Err(WorkspaceError::NotFound); }
+        let mut seen = std::collections::HashSet::new();
+        {
+            let mut query = tx.prepare("SELECT f.value FROM scan_runs r,json_each(r.data,'$.findings') f WHERE r.workspace_id=?1 AND json_extract(r.data,'$.origin')='automatic' AND json_extract(f.value,'$.checkId') IN ('js-endpoints','js-secrets')")?;
+            let rows = query.query_map(params![workspace], |r| r.get::<_, String>(0))?;
+            for row in rows { seen.insert(key(&serde_json::from_str::<serde_json::Value>(&row?).map_err(|e| WorkspaceError::Other(e.into()))?)); }
+        }
+        let mut next = data.clone();
+        let findings = next["findings"].as_array_mut().ok_or_else(|| WorkspaceError::Other(anyhow::anyhow!("Missing JS findings")))?;
+        findings.retain(|f| seen.insert(key(f)));
+        if findings.is_empty() { return Ok(false); }
+        let ids: std::collections::HashSet<String> = findings.iter().filter_map(|f| f["id"].as_str().map(str::to_owned)).collect();
+        if let Some(checks) = next["checks"].as_array_mut() {
+            for check in checks {
+                if let Some(refs) = check["findingIds"].as_array_mut() {
+                    refs.retain(|id| id.as_str().is_some_and(|id| ids.contains(id)));
+                    if refs.is_empty() && check["status"] == "findings" { check["status"] = serde_json::json!("passed"); check["message"] = serde_json::json!("No new findings; previously reported findings omitted"); }
+                }
+            }
+        }
+        tx.execute("INSERT OR IGNORE INTO scan_runs(workspace_id,id,started_at,data) VALUES(?1,?2,?3,?4)",params![workspace,id,next["startedAt"].as_str().unwrap_or(""),next.to_string()])?;
+        tx.commit()?;
+        drop(db);
+        self.publish(TrafficEvent::ScanChanged { workspace_id: workspace.into() });
+        Ok(true)
+    }
+    /// Read request snapshots only, including old capture-ID audit reports.
+    pub fn legacy_automatic_api_requests(&self, workspace: &str, method: &str, body: &str) -> Result<Vec<(serde_json::Value, bool)>> {
+        let db = self.lock_for(Some(workspace))?;
+        let mut query = db.prepare("SELECT json_extract(data,'$.plan.request'), (SELECT count(DISTINCT json_extract(value,'$.checkId')) FROM json_each(scan_runs.data,'$.checks') WHERE json_extract(value,'$.checkId') IN ('noauthen','cors') AND json_extract(value,'$.status') IN ('passed','findings')) = 2 FROM scan_runs WHERE workspace_id=?1 AND json_extract(data,'$.origin')='automatic' AND json_extract(data,'$.plan.mode')='active' AND json_extract(data,'$.plan.request.method')=?2 AND json_extract(data,'$.plan.request.body')=?3")?;
+        let rows = query.query_map(params![workspace, method, body], |r| Ok((r.get::<_,String>(0)?, r.get::<_,bool>(1)?)))?;
+        rows.map(|r| { let (request, complete) = r?; Ok((serde_json::from_str(&request)?, complete)) }).collect()
+    }
+    pub fn has_completed_automatic_check(&self, workspace: &str, key: &str, check: &str) -> Result<bool> {
+        let db = self.lock_for(Some(workspace))?;
+        Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM scan_runs, json_each(scan_runs.data,'$.checks') AS c WHERE workspace_id=?1 AND json_extract(data,'$.origin')='automatic' AND json_extract(data,'$.auditKey')=?2 AND json_extract(c.value,'$.checkId')=?3 AND json_extract(c.value,'$.status') IN ('passed','findings'))", params![workspace,key,check], |r| r.get(0))?)
     }
     pub fn get_scan_run(&self,workspace:&str,id:&str)->Result<Option<serde_json::Value>>{
-        let db=self.lock_db()?;let raw:Option<String>=db.query_row("SELECT data FROM scan_runs WHERE workspace_id=?1 AND id=?2",params![workspace,id],|r|r.get(0)).optional()?;raw.map(|s|serde_json::from_str(&s).map_err(Into::into)).transpose()
+        let db=self.lock_for(Some(workspace))?;let raw:Option<String>=db.query_row("SELECT data FROM scan_runs WHERE workspace_id=?1 AND id=?2",params![workspace,id],|r|r.get(0)).optional()?;raw.map(|s|serde_json::from_str(&s).map_err(Into::into)).transpose()
     }
     pub fn list_scan_runs(&self,workspace:&str,offset:usize)->Result<Vec<serde_json::Value>>{
-        let db=self.lock_db()?;let mut query=db.prepare("SELECT json_object('id',id,'startedAt',started_at,'status',json_extract(data,'$.status'),'sent',json_extract(data,'$.sent'),'findings',json_array_length(data,'$.findings'),'url',json_extract(data,'$.plan.request.url'),'method',json_extract(data,'$.plan.request.method'),'mode',json_extract(data,'$.plan.mode'),'maxRequests',json_extract(data,'$.plan.maxRequests'),'profileName',json_extract(data,'$.profileName')) FROM scan_runs WHERE workspace_id=?1 ORDER BY started_at DESC,id DESC LIMIT 50 OFFSET ?2")?;
+        let db=self.lock_for(Some(workspace))?;let mut query=db.prepare("SELECT json_object('id',id,'startedAt',started_at,'status',json_extract(data,'$.status'),'sent',json_extract(data,'$.sent'),'findings',json_array_length(data,'$.findings'),'url',json_extract(data,'$.plan.request.url'),'method',json_extract(data,'$.plan.request.method'),'mode',json_extract(data,'$.plan.mode'),'maxRequests',json_extract(data,'$.plan.maxRequests'),'profileName',json_extract(data,'$.profileName')) FROM scan_runs WHERE workspace_id=?1 ORDER BY started_at DESC,id DESC LIMIT 50 OFFSET ?2")?;
         let rows=query.query_map(params![workspace,offset],|r|r.get::<_,String>(0))?;rows.map(|r|Ok(serde_json::from_str(&r?)?)).collect()
     }
     pub fn delete_scan_run(&self,workspace:&str,id:&str)->Result<(),WorkspaceError>{
-        let db=self.lock_db().map_err(WorkspaceError::Other)?;db.execute("DELETE FROM scan_runs WHERE workspace_id=?1 AND id=?2",params![workspace,id])?;Ok(())
+        let db=self.lock_for(Some(workspace)).map_err(WorkspaceError::Other)?;db.execute("DELETE FROM scan_runs WHERE workspace_id=?1 AND id=?2",params![workspace,id])?;Ok(())
     }
 }
 
 impl TrafficStorage {
  pub fn list_scan_findings(&self,workspace:&str,offset:usize,search:&str,status:&str,severity:&str)->Result<(usize,Vec<serde_json::Value>)>{
-  let db=self.lock_db()?;
-  let filter="r.workspace_id=?1 AND (?2='' OR instr(lower(json_extract(f.value,'$.title') || ' ' || json_extract(r.data,'$.plan.request.url')),lower(?2))>0) AND (?3='' OR json_extract(f.value,'$.status')=?3) AND (?4='' OR json_extract(f.value,'$.severity')=?4)";
+  let db=self.lock_for(Some(workspace))?;
+  let filter="r.workspace_id=?1 AND (?2='' OR instr(lower(json_extract(f.value,'$.title') || ' ' || json_extract(r.data,'$.plan.request.url') || ' ' || COALESCE(json_extract(f.value,'$.excerpts'),'')),lower(?2))>0) AND (?3='' OR json_extract(f.value,'$.status')=?3) AND (?4='' OR json_extract(f.value,'$.severity')=?4)";
   let total:usize=db.query_row(&format!("SELECT count(*) FROM scan_runs r,json_each(r.data,'$.findings') f WHERE {filter}"),params![workspace,search,status,severity],|r|r.get(0))?;
   let mut query=db.prepare(&format!("SELECT json_object('runId',r.id,'startedAt',r.started_at,'url',json_extract(r.data,'$.plan.request.url'),'method',json_extract(r.data,'$.plan.request.method'),'finding',json(f.value)) FROM scan_runs r,json_each(r.data,'$.findings') f WHERE {filter} ORDER BY r.started_at DESC,r.id DESC,CAST(f.key AS INTEGER) ASC LIMIT 100 OFFSET ?5"))?;
   let rows=query.query_map(params![workspace,search,status,severity,offset],|r|r.get::<_,String>(0))?;let data=rows.map(|r|Ok(serde_json::from_str(&r?)?)).collect::<Result<Vec<_>>>()?;Ok((total,data))

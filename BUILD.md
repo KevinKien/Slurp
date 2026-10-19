@@ -63,7 +63,7 @@ To package a cross-compiled ARM64 binary on an Intel Mac, place it in `dist/slur
 Combine the native CLI packages into a single universal CLI archive:
 
 ```sh
-node scripts/package-macos-cli.mjs --intel dist/artifacts/slurp-1.0.1-macos-x64-cli.tar.gz --arm64 dist/artifacts/slurp-1.0.1-macos-arm64-cli.tar.gz
+node scripts/package-macos-cli.mjs --intel dist/artifacts/slurp-1.1.0-macos-x64-cli.tar.gz --arm64 dist/artifacts/slurp-1.1.0-macos-arm64-cli.tar.gz
 ```
 
 ## Run
@@ -114,8 +114,8 @@ This requires Rust and Node to run the build script, but no frontend dependencie
 
 ## GitHub Actions
 
-The [build workflow](.github/workflows/build.yml) runs native Ubuntu, Windows and macOS builds. Select **Actions → Build Slurp → Run workflow**, or push a version tag such as `v1.0.1`. Download the platform artifacts: macOS DMG/CLI, Linux binary, or Windows EXE, each with a SHA-256 checksum. Separate macOS runners build Apple Silicon (`macos-15`, ARM64) and Intel (`macos-15-intel`, x64) DMGs and native CLI archives. A follow-up job combines the two CLI executables into one universal macOS archive. The Ubuntu and Windows runners build x64. The workflow does not publish a GitHub Release or deploy the app.
+The [build workflow](.github/workflows/build.yml) runs native Ubuntu, Windows and macOS builds. Select **Actions → Build Slurp → Run workflow**, or push a version tag such as `v1.1.0`. Download the platform artifacts: macOS DMG/CLI, Linux binary, or Windows EXE, each with a SHA-256 checksum. Separate macOS runners build Apple Silicon (`macos-15`, ARM64) and Intel (`macos-15-intel`, x64) DMGs and native CLI archives. A follow-up job combines the two CLI executables into one universal macOS archive. The Ubuntu and Windows runners build x64. The workflow does not publish a GitHub Release or deploy the app.
 
 ## Release version
 
-The version in the root `Cargo.toml` (`[workspace.package]`) is the single source for Rust crates, the UI footer, HAR creator metadata, and package names. Update it before a release, run `cargo check --offline` to refresh `Cargo.lock`, then rebuild the UI and binaries. Ordinary commits do not change the release version. After committing a release, create a matching tag such as `v1.0.1` to trigger the release build workflow.
+The version in the root `Cargo.toml` (`[workspace.package]`) is the single source for Rust crates, the UI footer, HAR creator metadata, and package names. Update it before a release, run `cargo check --offline` to refresh `Cargo.lock`, then rebuild the UI and binaries. Ordinary commits do not change the release version. After committing a release, create a matching tag such as `v1.1.0` to trigger the release build workflow.

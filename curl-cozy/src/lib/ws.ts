@@ -104,7 +104,10 @@ export function useTrafficStream(
           } else if (data.type === "replay_changed" || data.type === "replay_result") {
             window.dispatchEvent(new CustomEvent("httpdebugger:replay", { detail: data }));
           } else if (data.type === "lagged") {
+            window.dispatchEvent(new Event("slurp:scan-changed"));
             console.warn(`[ws] Lagged by ${data.count} messages`);
+          } else if (data.type === "scan_changed") {
+            window.dispatchEvent(new CustomEvent("slurp:scan-changed", { detail: data }));
           }
         } catch (e) {
           console.warn("[ws] Failed to parse message:", e);

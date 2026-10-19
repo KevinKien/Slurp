@@ -1,5 +1,34 @@
 import { apiFetch } from "./api";
 import type { ScanRun } from "./scan";
+export async function validateBrowserSnapshot(input: {
+  url: string;
+  body: string;
+  headers: Record<string, string>;
+  marker: string;
+  resources?: import("./scan/types").BrowserResource[];
+  interaction?: import("./scan/types").BrowserInteraction;
+}): Promise<Omit<import("./scan/types").BrowserObservation, "marker" | "url">> {
+  const response = await apiFetch<
+    | { ok: true; observation: Omit<import("./scan/types").BrowserObservation, "marker" | "url"> }
+    | { ok: false; error: string }
+  >("/api/scan/browser", { method: "POST", body: JSON.stringify(input) });
+  if (!response.ok) throw Error(response.error);
+  return response.observation;
+}
+export interface AutomaticAuditStatus {
+  enabled: boolean;
+  queued: number;
+  active: number;
+  completed: number;
+  skipped: number;
+  errors: number;
+}
+export const fetchAutomaticAudit = () => apiFetch<AutomaticAuditStatus>("/api/scan/automatic");
+export const setAutomaticAudit = (enabled: boolean) =>
+  apiFetch<AutomaticAuditStatus>("/api/scan/automatic", {
+    method: "PUT",
+    body: JSON.stringify({ enabled }),
+  });
 export interface ScanSummary {
   id: string;
   startedAt: string;
@@ -41,4 +70,27 @@ export const fetchScanFindings = (
 ) =>
   apiFetch<{ data: DashboardFinding[]; total: number; has_more: boolean }>(
     `/api/workspaces/${encodeURIComponent(workspace)}/scan-findings?${new URLSearchParams({ offset: String(offset), q, status, severity })}`,
+  );
+
+export const issueOastProbe = () =>
+  apiFetch<import("./scan/types").OastProbe>("/api/scan/oast/probes", { method: "POST" });
+export const pollOastProbe = (id: string) =>
+  apiFetch<import("./scan/types").OastProbe>(`/api/scan/oast/probes/${encodeURIComponent(id)}`);
+export const fetchOastStatus = () =>
+  apiFetch<{ enabled: boolean; error?: string; http: boolean; dns: boolean }>("/api/scan/oast");
+
+export const probeHttpProtocol = (input: {
+  url: string;
+  variant: import("./scan/types").ProtocolVariant;
+  timeoutMs: number;
+}) =>
+  apiFetch<import("./scan/types").ProtocolResponse | { ok: false; error: string }>(
+    "/api/scan/protocol",
+    { method: "POST", body: JSON.stringify(input) },
+  );
+
+export const lookupDependency = (name: string, version: string) =>
+  apiFetch<import("./scan/dependency-checks").DependencyResult | { ok: false; error: string }>(
+    "/api/scan/dependencies",
+    { method: "POST", body: JSON.stringify({ package: name, version }) },
   );

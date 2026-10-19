@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useScan } from "@/lib/scan-context";
 import { fetchScanFindings, type DashboardFinding, type ScanSummary } from "@/lib/scan-api";
 import type { ScanRun } from "@/lib/scan";
@@ -20,6 +20,23 @@ export function ScanDashboard({
   onSelect: (runId: string, findingId?: string) => void;
 }) {
   const scan = useScan();
+  const [taskPage, setTaskPage] = useState(0);
+  const pendingTaskPage = useRef(0);
+  useEffect(() => {
+    setTaskPage(pendingTaskPage.current);
+    pendingTaskPage.current = 0;
+  }, [offset, scan.workspace]);
+
+  const backendWorkspace = scan.workspace ?? "temporary";
+  useEffect(() => {
+    const update = () => setRefresh((v) => v + 1);
+    window.addEventListener("slurp:scan-changed", update);
+    const timer = setInterval(update, 5000);
+    return () => {
+      window.removeEventListener("slurp:scan-changed", update);
+      clearInterval(timer);
+    };
+  }, []);
   const [rows, setRows] = useState<DashboardFinding[]>([]),
     [total, setTotal] = useState(0),
     [page, setPage] = useState(0),
@@ -43,10 +60,9 @@ export function ScanDashboard({
   }, [query, status, severity]);
   useEffect(() => {
     let current = true;
-    if (!scan.workspace) return;
     setLoading(true);
     const timer = setTimeout(() => {
-      void fetchScanFindings(scan.workspace!, page, query, status, severity)
+      void fetchScanFindings(backendWorkspace, page, query, status, severity)
         .then((v) => {
           if (current) {
             setRows(v.data);
@@ -72,6 +88,7 @@ export function ScanDashboard({
       !scan.workspace ||
       r.status === "running" ||
       r.status === "paused" ||
+      !!scan.saveErrors?.[r.id] ||
       (r.id === scan.run?.id && (scan.busy || !!scan.error)),
   );
   const live = liveRuns
@@ -86,7 +103,10 @@ export function ScanDashboard({
     )
     .filter(
       (row) =>
-        (!query || `${row.finding.title} ${row.url}`.toLowerCase().includes(query.toLowerCase())) &&
+        (!query ||
+          `${row.finding.title} ${row.url} ${row.finding.excerpts.join(" ")}`
+            .toLowerCase()
+            .includes(query.toLowerCase())) &&
         (!status || row.finding.status === status) &&
         (!severity || row.finding.severity === severity),
     );
@@ -113,6 +133,9 @@ export function ScanDashboard({
           Number(["running", "paused"].includes(a.status)) ||
         b.startedAt.localeCompare(a.startedAt),
     );
+  useEffect(() => {
+    setTaskPage((p) => Math.min(p, Math.max(0, Math.ceil(taskRows.length / 10) - 1)));
+  }, [offset, scan.workspace, taskRows.length]);
   return (
     <div className="space-y-5">
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
@@ -120,7 +143,14 @@ export function ScanDashboard({
           { label: "Active tasks", value: active.length },
           {
             label: scan.workspace ? "Saved findings (filtered)" : "Session findings",
-            value: scan.workspace ? total : live.length,
+            value:
+              total +
+              live.filter(
+                (row) =>
+                  !rows.some(
+                    (saved) => saved.runId === row.runId && saved.finding.id === row.finding.id,
+                  ),
+              ).length,
           },
           { label: "Live findings", value: active.reduce((n, r) => n + r.findings.length, 0) },
           {
@@ -137,26 +167,39 @@ export function ScanDashboard({
       <section className="rounded-lg border bg-card">
         <div className="flex flex-wrap items-center gap-2 border-b p-4">
           <h2 className="mr-auto font-medium">Scan tasks</h2>
-          {scan.workspace && (
+          <span className="text-xs text-muted-foreground" aria-live="polite">
+            Page {Math.floor(offset / 50) * 5 + taskPage + 1} · 10 tasks per page
+          </span>
+          {
             <>
               <Button
                 variant="outline"
                 size="sm"
-                disabled={!offset}
-                onClick={() => onPage(Math.max(0, offset - 50))}
+                disabled={!offset && !taskPage}
+                onClick={() => {
+                  if (taskPage) setTaskPage((p) => p - 1);
+                  else {
+                    pendingTaskPage.current = 4;
+                    onPage(Math.max(0, offset - 50));
+                  }
+                }}
               >
-                Newer tasks
+                Previous tasks
               </Button>
               <Button
                 variant="outline"
                 size="sm"
-                disabled={!more}
-                onClick={() => onPage(offset + 50)}
+                disabled={!more && (taskPage + 1) * 10 >= taskRows.length}
+                onClick={() =>
+                  (taskPage + 1) * 10 < taskRows.length
+                    ? setTaskPage((p) => p + 1)
+                    : onPage(offset + 50)
+                }
               >
-                Older tasks
+                Next tasks
               </Button>
             </>
-          )}
+          }
           <Button
             variant="outline"
             size="sm"
@@ -180,7 +223,7 @@ export function ScanDashboard({
               </tr>
             </thead>
             <tbody>
-              {taskRows.map((task) => (
+              {taskRows.slice(taskPage * 10, taskPage * 10 + 10).map((task) => (
                 <tr key={task.id} className="border-t">
                   <td className="px-4 py-3">
                     <span className="mr-2 font-semibold text-primary">{task.method ?? "—"}</span>
@@ -209,10 +252,7 @@ export function ScanDashboard({
                       {task.status}
                     </span>
                   </td>
-                  <td className="px-4 py-3 tabular-nums">
-                    {task.sent}
-                    {task.mode === "active" && task.maxRequests ? ` / ${task.maxRequests} max` : ""}
-                  </td>
+                  <td className="px-4 py-3 tabular-nums">{task.sent}</td>
                   <td className="px-4 py-3 tabular-nums">{task.findings}</td>
                   <td className="px-4 py-3 whitespace-nowrap text-muted-foreground">
                     {new Date(task.startedAt).toLocaleString()}
@@ -227,19 +267,37 @@ export function ScanDashboard({
                       >
                         View
                       </Button>
-                      {task.id === scan.run?.id && ["running", "paused"].includes(task.status) && (
-                        <>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={task.status === "paused" ? scan.resume : scan.pause}
-                          >
-                            {task.status === "paused" ? "Resume" : "Pause"}
-                          </Button>
-                          <Button variant="destructive" size="sm" onClick={scan.stop}>
-                            Stop
-                          </Button>
-                        </>
+                      {scan.localRuns.some((r) => r.id === task.id) &&
+                        ["running", "paused"].includes(task.status) && (
+                          <>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() =>
+                                task.status === "paused"
+                                  ? scan.resume(task.id)
+                                  : scan.pause(task.id)
+                              }
+                            >
+                              {task.status === "paused" ? "Resume" : "Pause"}
+                            </Button>
+                            <Button
+                              variant="destructive"
+                              size="sm"
+                              onClick={() => scan.stop(task.id)}
+                            >
+                              Stop
+                            </Button>
+                          </>
+                        )}
+                      {scan.saveErrors?.[task.id] && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void scan.retrySave(task.id).catch(() => undefined)}
+                        >
+                          Retry saving
+                        </Button>
                       )}
                     </div>
                   </td>
@@ -321,7 +379,20 @@ export function ScanDashboard({
                       {row.finding.severity}
                     </span>
                   </td>
-                  <td className="px-4 py-3 font-medium">{row.finding.title}</td>
+                  <td className="px-4 py-3 font-medium">
+                    {row.finding.title}
+                    <span className="mt-1 block text-[10px] text-muted-foreground">
+                      {row.finding.checkId}
+                    </span>
+                    {row.finding.checkId.startsWith("js-") && (
+                      <span className="mt-1 block max-w-md break-all font-mono text-[11px] text-muted-foreground">
+                        {row.finding.excerpts.find(
+                          (value) =>
+                            value.startsWith("Endpoint candidate:") || value.includes(" = "),
+                        )}
+                      </span>
+                    )}
+                  </td>
                   <td className="px-4 py-3">
                     <span className="inline-block max-w-80 truncate font-mono" title={row.url}>
                       {row.method} {row.url}
@@ -349,7 +420,7 @@ export function ScanDashboard({
             </p>
           )}
         </div>
-        {scan.workspace && (
+        {
           <div className="flex items-center gap-3 border-t p-3 text-xs">
             <Button
               variant="outline"
@@ -373,7 +444,7 @@ export function ScanDashboard({
               Next findings
             </Button>
           </div>
-        )}
+        }
       </section>
     </div>
   );

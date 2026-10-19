@@ -97,3 +97,23 @@ describe("Request search", () => {
     expect(screen.queryByLabelText("Search request")).not.toBeInTheDocument();
   });
 });
+
+it("marks literal payload punctuation without interpreting it as a regex", () => {
+  const { container } = render(
+    <CodePane {...props} title="Request" body="q=a.b+[x] q=axb" highlightTerms={["a.b+[x]"]} />,
+  );
+  expect(container.querySelectorAll("[data-evidence-payload]")).toHaveLength(1);
+  expect(container.querySelector("[data-evidence-payload]")).toHaveTextContent("a.b+[x]");
+});
+it("highlights response changes past line 700 without marking the common prefix or suffix", () => {
+  const prefix = "same\n".repeat(750);
+  const { container } = render(
+    <CodePane
+      {...props}
+      body={prefix + "new result\nend"}
+      compareTo={{ body: prefix + "old result\nend", raw: "", headers: {} }}
+    />,
+  );
+  expect(container.querySelectorAll('[data-response-changed="true"]')).toHaveLength(1);
+  expect(container.querySelector('[data-response-changed="true"]')).toHaveTextContent("new result");
+});

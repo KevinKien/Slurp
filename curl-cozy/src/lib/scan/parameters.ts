@@ -88,3 +88,16 @@ export function withHeader(request: HttpRequest, name: string, value: string): H
     },
   };
 }
+
+/** Read the explicitly selected scalar without changing the captured request. */
+export function parameterValue(request: HttpRequest, parameter: ScanParameter): string {
+  if (parameter.kind === "query")
+    return new URL(request.url).searchParams.getAll(parameter.name)[parameter.occurrence] ?? "";
+  let node: unknown = JSON.parse(request.body);
+  for (const key of parts(parameter.pointer)) {
+    if (!node || typeof node !== "object" || !Object.hasOwn(node, key))
+      throw Error("JSON parameter not found.");
+    node = (node as Record<string, unknown>)[key];
+  }
+  return String(node ?? "");
+}

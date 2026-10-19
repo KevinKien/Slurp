@@ -2,7 +2,7 @@ import { authorizedFetch } from '@/lib/api-auth';
 import { API_BASE } from './api';
 
 export interface SendRequest {
-  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD' | 'OPTIONS';
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD' | 'OPTIONS' | 'TRACE';
   url: string;
   headers: Record<string, string>;
   body: string;

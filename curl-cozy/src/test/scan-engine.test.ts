@@ -91,7 +91,7 @@ describe("Scan parameters and planning", () => {
         parameters: [{ kind: "query", name: "missing", occurrence: 0 }],
       }),
     ).toThrow("not found");
-    expect(() => validateScanPlan({ ...active(), maxRequests: 1 })).toThrow("baseline");
+    expect(() => validateScanPlan({ ...active(), maxRequests: 1 })).not.toThrow();
   });
 });
 describe("Scan checks and verification", () => {
@@ -241,15 +241,39 @@ describe("Scan checks and verification", () => {
   });
 });
 describe("Scan lifecycle and evidence", () => {
-  it("enforces request budget and explicitly marks remaining checks skipped", async () => {
+  it("ignores legacy request budgets and completes all selected checks", async () => {
     vi.useFakeTimers();
     const plan = active(["reflection", "input-errors", "cors"]);
     plan.maxRequests = 3;
     const { run } = await execute(plan);
-    expect(run.sent).toBe(3);
-    expect(run.status).toBe("stopped");
-    expect(run.checks.find((c) => c.checkId === "cors")?.status).toBe("skipped");
-    expect(run.message).toContain("budget");
+    expect(run.sent).toBeGreaterThan(3);
+    expect(run.status).toBe("completed");
+    expect(run.checks.find((c) => c.checkId === "cors")?.status).not.toBe("skipped");
+  });
+  it("finishes every selected check beyond 100 requests", async () => {
+    vi.useFakeTimers();
+    const plan = active(["ldap-injection", "xpath-injection", "xml-injection"]);
+    plan.request.url =
+      "https://example.com/items?" +
+      Array.from({ length: 10 }, (_, i) => `q${i}=original`).join("&");
+    plan.parameters = Array.from({ length: 10 }, (_, i) => ({
+      kind: "query" as const,
+      name: `q${i}`,
+      occurrence: 0,
+    }));
+    const digest = globalThis.crypto?.subtle
+      ? vi.spyOn(crypto.subtle, "digest").mockResolvedValue(new ArrayBuffer(32))
+      : null;
+    let run;
+    try {
+      ({ run } = await execute(plan));
+    } finally {
+      digest?.mockRestore();
+    }
+    expect(run.sent).toBe(122);
+    expect(run.status).toBe("completed");
+    expect(run.checks).toHaveLength(30);
+    expect(run.checks.every((check) => check.status === "passed")).toBe(true);
   });
   it("spaces sends and supports pause/resume", async () => {
     vi.useFakeTimers();
@@ -380,4 +404,145 @@ describe("Scan negative controls and bounded evidence", () => {
     expect(run.sent).toBeLessThan(22);
     expect(run.bytes).toBeLessThanOrEqual(8_000_000);
   });
+});
+it("Both audits the captured response while active probes use fresh baselines", async () => {
+  vi.useFakeTimers();
+  const plan = active(["passive-audit", "reflection"]);
+  plan.mode = "both";
+  plan.observed = {
+    response: {
+      status: 200,
+      responseHeaders: { "content-type": "text/html" },
+      responseBody: "<h1>captured</h1>",
+    },
+  };
+  const { run } = await execute(
+    plan,
+    vi.fn(async (r) => ({
+      ok: true as const,
+      ...response({ responseBody: new URL(r.url).searchParams.get("q") ?? "" }),
+    })),
+  );
+  expect(run.status).toBe("completed");
+  expect(run.findings.some((f) => f.title.includes("Content-Security-Policy"))).toBe(true);
+  expect(run.findings.some((f) => f.checkId === "reflection")).toBe(true);
+  expect(run.evidence.some((e) => e.label === "Observed response")).toBe(true);
+});
+it("blocks intrusive checks before sending even when selected programmatically", async () => {
+  vi.useFakeTimers();
+  const plan = active(["path-traversal"]);
+  const { run, send } = await execute(plan);
+  expect(send).not.toHaveBeenCalled();
+  expect(run.checks[0]?.status).toBe("skipped");
+  expect(run.checks[0]?.message).toContain("policy");
+});
+it("enforces elapsed duration and forwards a bounded request timeout", async () => {
+  vi.useFakeTimers();
+  const plan = active();
+  plan.policy = {
+    maxImpact: "medium",
+    allowIntrusive: false,
+    includeExperimental: true,
+    maxDurationMs: 1000,
+    requestTimeoutMs: 5000,
+  };
+  const send = vi.fn(async (_request: HttpRequest, _options?: { timeoutMs: number }) => {
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    return { ok: true as const, ...response() };
+  });
+  const { run } = await execute(plan, send);
+  expect(run.status).toBe("stopped");
+  expect(run.message).toContain("duration");
+  expect(send.mock.calls[0]?.[1]).toEqual({ timeoutMs: 1000 });
+});
+it("allows only method-policy probes to use OPTIONS/TRACE and captures their actual methods", async () => {
+  vi.useFakeTimers();
+  const plan = active(["http-methods"]);
+  const send = vi.fn(async (r: HttpRequest) => ({
+    ok: true as const,
+    ...response({
+      responseHeaders: { allow: "GET, OPTIONS, TRACE" },
+      responseBody:
+        r.method === "TRACE"
+          ? `TRACE /items HTTP/1.1\r\nX-Slurp-Probe: ${r.headers["X-Slurp-Probe"]}\r\n`
+          : '{"ok":true}',
+    }),
+  }));
+  const { run } = await execute(plan, send);
+  expect(run.status).toBe("completed");
+  expect(run.evidence.filter((e) => e.request.method === "TRACE")).toHaveLength(2);
+  expect(run.findings.some((f) => f.title.includes("TRACE"))).toBe(true);
+  expect(send.mock.calls.map(([r]) => r.method)).toEqual([
+    "GET",
+    "GET",
+    "OPTIONS",
+    "TRACE",
+    "TRACE",
+  ]);
+});
+it("requires intrusive policy opt-in before scheduling time-based SQL probes", async () => {
+  vi.useFakeTimers();
+  const { run, send } = await execute(active(["sql-time"]));
+  expect(send).not.toHaveBeenCalled();
+  expect(run.checks[0]?.status).toBe("skipped");
+});
+it("anonymous diagnostic responses do not overwrite the selected profile cookie jar", async () => {
+  vi.useFakeTimers();
+  const receive = vi.fn();
+  const engine = new ScanEngine(active(["auth-access"]), {
+    isCurrent: () => true,
+    receive,
+    send: async (r) => ({
+      ok: true as const,
+      ...response({
+        setCookies: [
+          r.headers["Authorization"] === "Bearer a" ? "sid=authenticated" : "sid=anonymous",
+        ],
+      }),
+    }),
+  });
+  const done = engine.start();
+  await vi.runAllTimersAsync();
+  await vi.waitFor(() => expect(engine.active).toBe(false));
+  await done;
+  expect(engine.run.findings.some((f) => f.checkId === "auth-access")).toBe(true);
+  expect(receive).toHaveBeenCalledTimes(2);
+  expect(receive.mock.calls.every(([, cookies]) => cookies[0] === "sid=authenticated")).toBe(true);
+});
+it("ordinary checks cannot change the selected method or endpoint", async () => {
+  vi.useFakeTimers();
+  const { getScanCheck } = await import("../lib/scan/checks");
+  for (const patch of [{ method: "TRACE" }, { url: "https://example.com/other" }]) {
+    const spy = vi.spyOn(getScanCheck("reflection"), "run").mockImplementation(async (ctx) => {
+      await ctx.probe({ ...ctx.request, ...patch }, "Disallowed target");
+      return { findings: [], message: "unexpected" };
+    });
+    try {
+      const { run, send } = await execute(active());
+      expect(run.checks[0]?.status).toBe("inconclusive");
+      expect(send).toHaveBeenCalledTimes(2);
+    } finally {
+      spy.mockRestore();
+    }
+  }
+});
+
+it("fetches one unmodified response for passive scanning and never sends attack probes", async () => {
+  vi.useFakeTimers();
+  const plan = { ...newScanPlan(request), allowSending: true };
+  const { run, send } = await execute(plan);
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(send).toHaveBeenCalledWith(request, expect.any(Object));
+  expect(run.sent).toBe(1);
+  expect(run.status).toBe("completed");
+  expect(run.evidence[0]?.label).toBe("Passive response fetch");
+});
+it("does not retry or create findings if the passive response fetch fails", async () => {
+  vi.useFakeTimers();
+  const send = vi.fn(async () => ({ ok: false as const, error: "connection refused" }));
+  const { run } = await execute({ ...newScanPlan(request), allowSending: true }, send);
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(run.status).toBe("failed");
+  expect(run.findings).toHaveLength(0);
+  expect(run.message).toContain("Could not fetch");
 });

@@ -2,9 +2,45 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Copy, Check, WrapText, Search, ChevronUp, ChevronDown, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { pretty } from "@/lib/traffic";
+import { lineDiff } from "@/lib/response-diff";
 import { cn } from "@/lib/utils";
 
-function Highlight({ line }: { line: string }) {
+function Highlight({
+  line,
+  terms = [],
+  response = false,
+}: {
+  line: string;
+  terms?: string[];
+  response?: boolean;
+}) {
+  const candidates = terms.filter(Boolean).sort((a, b) => b.length - a.length);
+  if (candidates.length) {
+    const pattern = new RegExp(
+      "(" + candidates.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|") + ")",
+      "g",
+    );
+    return (
+      <>
+        {line.split(pattern).map((part, i) =>
+          candidates.includes(part) ? (
+            <mark
+              key={i}
+              data-evidence-payload
+              className={cn(
+                "text-foreground rounded-sm",
+                response ? "bg-rose-500/30" : "bg-yellow-500/35",
+              )}
+            >
+              {part}
+            </mark>
+          ) : (
+            <Highlight key={i} line={part} />
+          ),
+        )}
+      </>
+    );
+  }
   const parts = line.split(
     /("(?:[^"\\]|\\.)*"\s*:|"(?:[^"\\]|\\.)*"|\b(?:true|false|null|\d+)\b)/g,
   );
@@ -37,14 +73,20 @@ export function CodePane({
   raw,
   headers,
   extra,
+  highlightTerms = [],
+  compareTo,
+  initialTab = "Pretty",
 }: {
   title: string;
+  initialTab?: "Pretty" | "Raw" | "Headers";
   body: string;
   raw: string;
   headers: Record<string, string>;
   extra?: React.ReactNode;
+  highlightTerms?: string[];
+  compareTo?: { body: string; raw: string; headers: Record<string, string> } | undefined;
 }) {
-  const [tab, setTab] = useState("Pretty");
+  const [tab, setTab] = useState<string>(initialTab);
   const [copied, setCopied] = useState(false);
   const [wrap, setWrap] = useState(true);
   const [query, setQuery] = useState("");
@@ -67,6 +109,39 @@ export function CodePane({
           : pretty(body),
     [tab, headers, raw, body],
   );
+  const changedLines = useMemo(() => {
+    if (!compareTo) return new Set<number>();
+    const before =
+      tab === "Headers"
+        ? Object.entries(compareTo.headers)
+            .map(([k, v]) => `${k}: ${v}`)
+            .join("\n")
+        : tab === "Raw"
+          ? compareTo.raw
+          : pretty(compareTo.body);
+    const diff = lineDiff(before, text);
+    if (diff.truncated) {
+      const oldLines = before.split("\n"),
+        newLines = text.split("\n");
+      let start = 0,
+        oldEnd = oldLines.length,
+        newEnd = newLines.length;
+      while (start < oldEnd && start < newEnd && oldLines[start] === newLines[start]) start++;
+      while (oldEnd > start && newEnd > start && oldLines[oldEnd - 1] === newLines[newEnd - 1]) {
+        oldEnd--;
+        newEnd--;
+      }
+      return new Set(Array.from({ length: newEnd - start }, (_, i) => start + i));
+    }
+    let line = 0;
+    const changed = new Set<number>();
+    for (const row of diff.lines) {
+      if (row.kind === "removed") continue;
+      if (row.kind === "added") changed.add(line);
+      line++;
+    }
+    return changed;
+  }, [compareTo, tab, text]);
   const { matches, limited } = useMemo(() => {
     const found: { start: number; end: number }[] = [];
     if (!searchable || !query) return { matches: found, limited: false };
@@ -290,14 +365,26 @@ export function CodePane({
           {lines.map(({ line, segments }, index) => {
             let offset = 0;
             return (
-              <div className="code-line" key={index}>
+              <div
+                className={cn(
+                  "code-line",
+                  changedLines.has(index) &&
+                    (title === "Request" ? "bg-yellow-500/15" : "bg-emerald-500/15"),
+                )}
+                data-response-changed={changedLines.has(index) || undefined}
+                key={index}
+              >
                 <span className={cn("code-line-content pr-4", !wrap && "whitespace-pre")}>
                   {segments.map((segment) => {
                     const prefix = line.slice(offset, segment.start);
                     offset = segment.end;
                     return (
                       <span key={segment.index}>
-                        <Highlight line={prefix} />
+                        <Highlight
+                          line={prefix}
+                          terms={highlightTerms}
+                          response={title === "Response"}
+                        />
                         <mark
                           data-search-match={segment.index}
                           aria-current={segment.index === active ? "true" : undefined}
@@ -313,7 +400,11 @@ export function CodePane({
                       </span>
                     );
                   })}
-                  <Highlight line={line.slice(offset)} />
+                  <Highlight
+                    line={line.slice(offset)}
+                    terms={highlightTerms}
+                    response={title === "Response"}
+                  />
                 </span>
               </div>
             );

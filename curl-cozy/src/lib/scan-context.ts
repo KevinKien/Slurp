@@ -8,17 +8,22 @@ export interface ScanState {
   configuring: boolean;
   setConfiguring: (open: boolean) => void;
   updateDraft: (plan: ScanPlan) => void;
-  prepare: (read: () => HttpRequest | Promise<HttpRequest>) => Promise<void>;
+  prepare: (
+    read: () => HttpRequest | Promise<HttpRequest>,
+    mode?: "passive" | "active",
+  ) => Promise<void>;
   forget: (id: string) => void;
   run: ScanRun | null;
   localRuns: ScanRun[];
   busy: boolean;
   error: string;
+  saveErrors?: Record<string, string>;
+  pendingRunIds?: string[];
   start: (plan: ScanPlan, profileId?: string | null) => void;
-  stop: () => void;
-  pause: () => void;
-  resume: () => void;
-  retrySave: () => Promise<void>;
+  stop: (id?: string) => void;
+  pause: (id?: string) => void;
+  resume: (id?: string) => void;
+  retrySave: (id?: string) => Promise<void>;
 }
 export const ScanContext = createContext<ScanState | null>(null);
 export const useOptionalScan = () => useContext(ScanContext);

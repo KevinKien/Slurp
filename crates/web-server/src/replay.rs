@@ -42,7 +42,7 @@ pub(crate) fn validate_request(request: &Value) -> Result<(), Error> {
     let method = request["method"]
         .as_str()
         .ok_or_else(|| bad("method required"))?;
-    if !["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].contains(&method) {
+    if !["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE"].contains(&method) {
         return Err(bad("Unsupported method"));
     }
     let url = request["url"].as_str().ok_or_else(|| bad("url required"))?;

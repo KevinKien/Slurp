@@ -75,7 +75,7 @@ export function mapApiEntry(entry: ApiTrafficEntry): Traffic {
 export function mapApiEntries(entries: ApiTrafficEntry[]): Traffic[] {
   return entries.map(mapApiEntry);
 }
-export const methods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
+export const methods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', 'TRACE'];
 export const pretty = (body: string) => { try { return JSON.stringify(JSON.parse(body), null, 2); } catch { return body.replace(/></g, '>\n<'); } };
 export const sizeLabel = (size: number) => size >= 1024 ? `${(size / 1024).toFixed(1)} KB` : `${size} B`;
 export const requestText = (r: HttpRequest) => { if(r.url.includes('{{'))return `${r.method} ${r.url} HTTP/1.1\n${Object.entries(r.headers).map(([k,v])=>`${k}: ${v}`).join('\n')}\n\n${r.body}`; const u = new URL(r.url); return `${r.method} ${u.pathname}${u.search} HTTP/1.1\nHost: ${u.host}\n${Object.entries(r.headers).map(([k,v]) => `${k}: ${v}`).join('\n')}\n\n${r.body}`; };

@@ -4,6 +4,13 @@ pub mod access;
 pub mod certificate;
 pub mod intruder;
 pub mod scan;
+mod scan_browser;
+mod scan_protocol;
+mod scan_dependencies;
+mod oast;
+pub mod auto_audit;
+mod forbidden_audit;
+mod js_audit;
 pub mod security;
 pub mod proxy_settings;
 pub mod flows;
@@ -41,6 +48,8 @@ pub async fn start(addr: SocketAddr, storage: Arc<TrafficStorage>, intercept: Ar
 
 /// Serve an already-bound listener so the CLI can fail before reporting readiness.
 pub async fn serve(listener: tokio::net::TcpListener, storage: Arc<TrafficStorage>, intercept: Arc<Intercept>, proxy_control: proxy_core::ProxyControl, certificate: certificate::PublicCaCertificate, access: access::ApiAccess) -> Result<()> {
+    let (audit, _audit_runtime) = auto_audit::start(storage.clone(), intercept.clone());
+    let (oast, _oast_runtime) = oast::start().await;
     let origins = origin::AllowedOrigins::from_env(listener.local_addr()?);
     let cors = CorsLayer::new()
         .allow_origin(origins.cors_predicate())
@@ -48,6 +57,13 @@ pub async fn serve(listener: tokio::net::TcpListener, storage: Arc<TrafficStorag
         .allow_headers(Any);
 
     let app = Router::new()
+        .route("/api/scan/browser", post(scan_browser::render))
+        .route("/api/scan/protocol", post(scan_protocol::probe))
+        .route("/api/scan/dependencies", post(scan_dependencies::lookup))
+        .route("/api/scan/oast", get(oast::status))
+        .route("/api/scan/oast/probes", post(oast::issue))
+        .route("/api/scan/oast/probes/:id", get(oast::poll))
+        .route("/api/scan/automatic", get(auto_audit::status).put(auto_audit::settings))
         .route("/api/ca.crt", get(certificate::download))
         .route("/api/websockets", get(websocket::connections))
         .route("/api/websockets/:id/frames", get(websocket::frames))
@@ -117,6 +133,8 @@ pub async fn serve(listener: tokio::net::TcpListener, storage: Arc<TrafficStorag
         .layer(Extension(intercept))
         .layer(Extension(proxy_control))
         .layer(Extension(certificate))
+        .layer(Extension(audit))
+        .layer(Extension(oast))
         .with_state(storage);
 
     info!("🌐 Web server listening on http://{}", listener.local_addr()?);

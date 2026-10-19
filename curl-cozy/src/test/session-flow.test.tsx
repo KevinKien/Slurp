@@ -25,6 +25,8 @@ const api = vi.hoisted(() => ({
 const send = vi.hoisted(() => vi.fn());
 const wsStatus = vi.hoisted(() => ({ value: "connected" as "connected" | "disconnected" }));
 vi.mock("@/lib/api", () => api);
+// Authentication has its own tests; workspace fixtures assume an authenticated UI.
+vi.mock("@/components/api-access", () => ({ ApiAccessGate: () => null }));
 vi.mock("@/lib/ws", () => ({ useTrafficStream: () => ({ status: wsStatus.value }) }));
 vi.mock("@/lib/replay.functions", () => ({ sendHttpRequest: send }));
 vi.mock("@/components/ui/resizable", () => {
@@ -240,4 +242,17 @@ describe("Replay requests are saved to the workspace", () => {
     await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
     expect(api.saveReplay).not.toHaveBeenCalled();
   });
+});
+
+it("selecting a header workspace switches capture and removes the temporary banner", async () => {
+  session = { target: "temporary", workspace_id: null, temporary_count: 2 };
+  renderShell();
+  expect(await screen.findByText(/requests are kept in memory only/i)).toBeInTheDocument();
+  const trigger = screen.getByRole("button", { name: "Switch workspace" });
+  fireEvent(trigger, new MouseEvent("pointerdown", { bubbles: true, button: 0, ctrlKey: false }));
+  const item=await screen.findByRole("menuitem", { name: /Staging/ });
+  fireEvent.click(item);
+  await waitFor(()=>expect(api.activateWorkspace).toHaveBeenCalledWith("w1"));
+  await waitFor(()=>expect(screen.queryByText(/requests are kept in memory only/i)).not.toBeInTheDocument());
+  expect(localStorage.getItem("intercept.viewWorkspace")).toBe("w1");
 });

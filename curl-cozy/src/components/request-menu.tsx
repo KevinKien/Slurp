@@ -19,12 +19,14 @@ import { toCurl } from "@/lib/request-actions";
 
 export function RequestMenu({
   request,
+  passiveRequest,
   children,
   disabled = false,
   websocketKind,
   onDelete,
 }: {
   request: HttpRequest | (() => HttpRequest | Promise<HttpRequest>);
+  passiveRequest?: HttpRequest | (() => HttpRequest | Promise<HttpRequest>);
   children: ReactElement;
   disabled?: boolean;
   onDelete?: () => void | Promise<void>;
@@ -34,6 +36,8 @@ export function RequestMenu({
   const intruder = useIntruder();
   const scan = useOptionalScan();
   const read = () => (typeof request === "function" ? request() : request);
+  const readPassive = () =>
+    typeof passiveRequest === "function" ? passiveRequest() : (passiveRequest ?? read());
   const report = (error: unknown) =>
     toast.error(error instanceof Error ? error.message : "Request action failed");
   return (
@@ -50,8 +54,20 @@ export function RequestMenu({
                 if (!["http:", "https:", "ws:", "wss:"].includes(url.protocol))
                   throw new Error("Use an HTTP(S) or WS(S) URL.");
                 const id = nextReplayTabId(sessions);
-                const request = isWebSocketRequest(source) ? websocketRequest(source) : { ...source, headers: { ...source.headers } };
-                setSessions((previous) => [...previous, { id, name: url.pathname, request, ...(isWebSocketRequest(request)&&websocketKind?{wsKind:websocketKind}:{}) }]);
+                const request = isWebSocketRequest(source)
+                  ? websocketRequest(source)
+                  : { ...source, headers: { ...source.headers } };
+                setSessions((previous) => [
+                  ...previous,
+                  {
+                    id,
+                    name: url.pathname,
+                    request,
+                    ...(isWebSocketRequest(request) && websocketKind
+                      ? { wsKind: websocketKind }
+                      : {}),
+                  },
+                ]);
                 setActive(id);
               };
               try {
@@ -100,23 +116,38 @@ export function RequestMenu({
           </ContextMenuItem>
         )}
         <ContextMenuSeparator />
-        <ContextMenuItem asChild disabled={disabled || !scan}>
-          <Link
-            to="/dashboard"
-            className="gap-2"
-            onClick={(event) => {
-              if (disabled || !scan) {
-                event.preventDefault();
-                return;
-              }
-              void scan.prepare(read).catch(report);
-            }}
-          >
-            <ScanLine className="size-4" />
-            Scan
-          </Link>
-        </ContextMenuItem>
-        {onDelete && <><ContextMenuSeparator /><ContextMenuItem className="gap-2 text-destructive focus:text-destructive" onSelect={()=>{void Promise.resolve().then(onDelete).catch(report);}}><Trash2 className="size-4"/>Delete request</ContextMenuItem></>}
+        {(["passive", "active"] as const).map((mode) => (
+          <ContextMenuItem key={mode} asChild disabled={disabled || !scan}>
+            <Link
+              to="/dashboard"
+              className="gap-2"
+              onClick={(event) => {
+                if (disabled || !scan) {
+                  event.preventDefault();
+                  return;
+                }
+                void scan.prepare(mode === "passive" ? readPassive : read, mode).catch(report);
+              }}
+            >
+              <ScanLine className="size-4" />
+              Scan {mode}
+            </Link>
+          </ContextMenuItem>
+        ))}
+        {onDelete && (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              className="gap-2 text-destructive focus:text-destructive"
+              onSelect={() => {
+                void Promise.resolve().then(onDelete).catch(report);
+              }}
+            >
+              <Trash2 className="size-4" />
+              Delete request
+            </ContextMenuItem>
+          </>
+        )}
       </ContextMenuContent>
     </ContextMenu>
   );

@@ -11,7 +11,22 @@ const mock = vi.hoisted(() => ({
   receive: vi.fn(),
 }));
 vi.mock("../lib/replay.functions", () => ({ sendHttpRequest: mock.send }));
-vi.mock("../lib/scan-api", () => ({ saveScanRun: (...args: unknown[]) => mock.save(...args) }));
+vi.mock("../lib/scan-api", () => ({
+  saveScanRun: (...args: unknown[]) => mock.save(...args),
+  validateBrowserSnapshot: vi.fn(),
+  lookupDependency: vi.fn(() => {
+    throw Error("Unexpected dependency lookup");
+  }),
+  probeHttpProtocol: vi.fn(() => {
+    throw Error("Unexpected protocol probe");
+  }),
+  issueOastProbe: vi.fn(async () => {
+    throw Error("Unexpected OAST call in a non-OAST scan");
+  }),
+  pollOastProbe: vi.fn(async () => {
+    throw Error("Unexpected OAST call in a non-OAST scan");
+  }),
+}));
 vi.mock("../components/inspector", () => ({
   useInspector: () => ({
     session: mock.workspace
@@ -71,14 +86,14 @@ beforeEach(() => {
     receive: mock.receive,
   });
 });
-it("snapshots the chosen profile, rejects double starts and persists evidence", async () => {
+it("snapshots a separate chosen profile for concurrent scans and persists their evidence", async () => {
   render(
     <ScanProvider>
       <Probe />
     </ScanProvider>,
   );
   act(() => ctx.start(active(), "a"));
-  expect(() => ctx.start(active(), "a")).toThrow("current scan");
+  act(() => ctx.start({ ...active(), request: { ...req, url: "https://example.com/other" } }, "a"));
   await waitFor(() => expect(ctx.busy).toBe(false));
   expect(mock.create).toHaveBeenCalledWith("a", { token: "shared" });
   expect(mock.send.mock.calls[0]![0].data.headers.Authorization).toBe("Bearer profile");
@@ -139,10 +154,13 @@ it("retries evidence saving without sending again", async () => {
   plan.observed = { response };
   act(() => ctx.start(plan));
   await waitFor(() => expect(ctx.error).toBe("storage offline"));
-  expect(() => ctx.start(plan)).toThrow("previous scan evidence");
+  const failedId = ctx.run!.id;
+  act(() => ctx.start(plan));
+  await waitFor(() => expect(ctx.busy).toBe(false));
+  expect(ctx.saveErrors?.[failedId]).toBe("storage offline");
   await act(() => ctx.retrySave());
   expect(ctx.error).toBe("");
-  expect(mock.save).toHaveBeenCalledTimes(2);
+  expect(mock.save).toHaveBeenCalledTimes(3);
   expect(mock.send).not.toHaveBeenCalled();
 });
 
@@ -199,4 +217,59 @@ it("discards late request loads after a workspace change", async () => {
   });
   expect(ctx.draft).toBeNull();
   expect(ctx.preparing).toBe(false);
+});
+
+it("keeps more than three concurrent tasks and controls only the requested task", async () => {
+  const finishes: ((v: unknown) => void)[] = [];
+  mock.send.mockImplementation(() => new Promise((resolve) => finishes.push(resolve)));
+  render(
+    <ScanProvider>
+      <Probe />
+    </ScanProvider>,
+  );
+  act(() => {
+    for (let i = 0; i < 5; i++)
+      ctx.start({ ...active(), request: { ...req, url: `https://example.com/items/${i}` } });
+  });
+  await waitFor(() => expect(mock.send).toHaveBeenCalledTimes(5));
+  expect(ctx.localRuns).toHaveLength(5);
+  const ids = ctx.localRuns.map((r) => r.id);
+  act(() => ctx.pause(ids[0]));
+  expect(ctx.localRuns.find((r) => r.id === ids[0])?.status).toBe("paused");
+  expect(ctx.localRuns.filter((r) => r.status === "running")).toHaveLength(4);
+  act(() => ctx.resume(ids[0]));
+  expect(ctx.localRuns.find((r) => r.id === ids[0])?.status).toBe("running");
+  act(() => ctx.stop(ids[0]));
+  await act(async () => {
+    for (const finish of finishes.splice(0)) finish({ ok: true, ...response });
+  });
+  await waitFor(() => expect(ctx.localRuns.find((r) => r.id === ids[0])?.status).toBe("stopped"));
+  expect(ctx.busy).toBe(true);
+  act(() => {
+    for (const id of ids.slice(1)) ctx.stop(id);
+  });
+  await act(async () => {
+    for (const finish of finishes.splice(0)) finish({ ok: true, ...response });
+  });
+  await waitFor(() => expect(ctx.busy).toBe(false));
+  expect(ctx.localRuns.every((r) => r.status === "stopped")).toBe(true);
+});
+
+it("fetches a missing passive response only when the prepared scan is started", async () => {
+  render(
+    <ScanProvider>
+      <Probe />
+    </ScanProvider>,
+  );
+  await act(async () => {
+    await ctx.prepare(() => req, "passive");
+  });
+  expect(mock.send).not.toHaveBeenCalled();
+  act(() => ctx.start(ctx.draft!));
+  await waitFor(() => expect(ctx.busy).toBe(false));
+  expect(mock.send).toHaveBeenCalledTimes(1);
+  expect(ctx.run?.plan.mode).toBe("passive");
+  expect(ctx.run?.sent).toBe(1);
+  expect(ctx.run?.status).toBe("completed");
+  expect(ctx.run?.evidence[0]?.request.headers["Authorization"]).toBe("Bearer profile");
 });
