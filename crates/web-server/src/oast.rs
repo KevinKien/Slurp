@@ -3,6 +3,7 @@ use axum::{
     extract::{ConnectInfo, Path},
     http::StatusCode,
     routing::any,
+    response::{IntoResponse, Response},
     Extension, Json, Router,
 };
 use serde::Serialize;
@@ -29,6 +30,8 @@ pub struct Probe {
     events: Vec<Event>,
     #[serde(skip)]
     deadline: Instant,
+    #[serde(skip)]
+    material: Option<(String, String)>,
 }
 #[derive(Clone, Serialize)]
 struct Event {
@@ -113,6 +116,7 @@ impl Collector {
             expires_at: (chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339(),
             events: vec![],
             deadline: Instant::now() + Duration::from_secs(600),
+            material: None,
         };
         probes.insert(id, probe.clone());
         Ok(probe)
@@ -147,9 +151,9 @@ async fn callback(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path(id): Path<String>,
     request: axum::extract::Request,
-) -> StatusCode {
+) -> Response {
     if request.method() == axum::http::Method::OPTIONS {
-        return StatusCode::METHOD_NOT_ALLOWED;
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
     }
     if collector.record(
         &id,
@@ -157,9 +161,17 @@ async fn callback(
         peer,
         format!("{} {}", request.method(), request.uri().path()),
     ) {
-        StatusCode::NO_CONTENT
+        if let Some((kind, body)) = collector.poll(&id).and_then(|p| p.material) {
+            if !matches!(*request.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
+                return StatusCode::METHOD_NOT_ALLOWED.into_response();
+            }
+            let mime = if kind == "jwks" { "application/jwk-set+json" } else { "application/x-pem-file" };
+            return ([("content-type", mime), ("cache-control", "no-store"), ("x-content-type-options", "nosniff")],
+                if request.method() == axum::http::Method::HEAD { String::new() } else { body }).into_response();
+        }
+        StatusCode::NO_CONTENT.into_response()
     } else {
-        StatusCode::NOT_FOUND
+        StatusCode::NOT_FOUND.into_response()
     }
 }
 fn callback_router(collector: Collector) -> Router {
@@ -321,6 +333,40 @@ pub async fn issue(
         .map(Json)
         .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":e}))))
 }
+
+fn valid_material(kind: &str, body: &str) -> bool {
+    use base64::Engine;
+    if body.len() > 12000 || body.contains("PRIVATE KEY") { return false; }
+    if kind == "jwks" {
+        let Ok(value) = serde_json::from_str::<Value>(body) else { return false; };
+        let Some(keys) = value["keys"].as_array() else { return false; };
+        return (1..=2).contains(&keys.len()) && keys.iter().all(|k| {
+            let public = |name: &str, max: usize| k[name].as_str().is_some_and(|s| !s.is_empty() && s.len()<=max && s.bytes().all(|b| b.is_ascii_alphanumeric() || b==b'_' || b==b'-'));
+            k["kty"] == "RSA" && public("n", 1500) && public("e", 16)
+                && ["d","p","q","dp","dq","qi","oth"].iter().all(|name| k.get(*name).is_none())
+                && k.as_object().is_some_and(|o| o.keys().all(|n| ["kty","n","e","kid","alg","use","key_ops"].contains(&n.as_str())))
+        });
+    }
+    if kind == "certificate" {
+        let value = body.trim();
+        let Some(value) = value.strip_prefix("-----BEGIN CERTIFICATE-----").and_then(|s| s.strip_suffix("-----END CERTIFICATE-----")) else { return false; };
+        let encoded: String = value.chars().filter(|c| !c.is_whitespace()).collect();
+        return base64::engine::general_purpose::STANDARD.decode(encoded).is_ok_and(|b| b.len()>=100 && b.len()<=8000 && b[0]==0x30);
+    }
+    false
+}
+pub async fn issue_key(
+    Extension(c): Extension<Collector>, Json(value): Json<Value>,
+) -> Result<Json<Probe>, (StatusCode, Json<Value>)> {
+    let kind = value["kind"].as_str().unwrap_or("");
+    let body = value["body"].as_str().unwrap_or("");
+    if !valid_material(kind, body) {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"Expected bounded public RSA JWKS or certificate; private keys and arbitrary content are rejected"}))));
+    }
+    let p = c.issue().map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":e}))))?;
+    c.0.probes.lock().unwrap().get_mut(&p.id).unwrap().material = Some((kind.into(), body.into()));
+    Ok(Json(p))
+}
 pub async fn poll(
     Extension(c): Extension<Collector>,
     Path(id): Path<String>,
@@ -347,6 +393,38 @@ mod tests {
         }
         packet.extend_from_slice(&[0, 0, 1, 0, 1]);
         packet
+    }
+    #[test]
+    fn jwt_key_hosting_rejects_private_or_arbitrary_content() {
+        assert!(valid_material("jwks", r#"{"keys":[{"kty":"RSA","n":"abc","e":"AQAB","kid":"scan"}]}"#));
+        for body in [r#"{"keys":[{"kty":"RSA","n":"abc","e":"AQAB","d":"secret"}]}"#, r#"{"keys":[{"kty":"oct","k":"secret"}]}"#, r#"{"keys":[]}"#] {
+            assert!(!valid_material("jwks", body));
+        }
+        assert!(!valid_material("certificate", "-----BEGIN PRIVATE KEY-----"));
+        assert!(!valid_material("html", "<script>alert(1)</script>"));
+        assert!(!valid_material("jwks", &"x".repeat(12001)));
+    }
+    #[tokio::test]
+    async fn jwt_public_material_is_served_only_for_live_random_probes() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let c = Collector::new(Some(reqwest::Url::parse(&format!("http://{addr}")).unwrap()), None, None, None);
+        let body = r#"{"keys":[{"kty":"RSA","n":"abc","e":"AQAB","kid":"scan"}]}"#;
+        let probe = issue_key(Extension(c.clone()), Json(json!({"kind":"jwks","body":body}))).await.unwrap().0;
+        let router = callback_router(c.clone());
+        let _runtime = Runtime(vec![tokio::spawn(async move { axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap(); })]);
+        let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(3)).build().unwrap();
+        let response = client.get(&probe.url).send().await.unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()["content-type"], "application/jwk-set+json");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(response.text().await.unwrap(), body);
+        assert_eq!(c.poll(&probe.id).unwrap().events.len(), 1);
+        assert!(serde_json::to_value(c.poll(&probe.id).unwrap()).unwrap().get("material").is_none());
+        assert_eq!(client.post(&probe.url).send().await.unwrap().status(), 405);
+        c.0.probes.lock().unwrap().get_mut(&probe.id).unwrap().deadline = Instant::now() - Duration::from_secs(1);
+        assert_eq!(client.get(&probe.url).send().await.unwrap().status(), 404);
     }
     #[test]
     fn oast_correlates_only_live_probes_and_bounds_storage() {

@@ -212,7 +212,7 @@ export const elInjection = arithmeticCheck(
 );
 
 function parserCheck(
-  id: "ldap-injection" | "xpath-injection" | "xml-injection",
+  id: "ldap-injection" | "xpath-injection" | "xml-injection" | "nosql-injection",
   name: string,
   payload: string,
   signature: RegExp,
@@ -263,6 +263,13 @@ function parserCheck(
     },
   };
 }
+export const nosqlInjection = parserCheck(
+  "nosql-injection",
+  "NoSQL injection — parser error differential",
+  "'\";{[$slurp]}",
+  /(?:Mongo(?:Server|Error|ParseError|QueryException)|BSON(?:Error|TypeError)|unknown (?:top level )?operator:\s*\$|(?:invalid|malformed) BSON|CouchbaseException|com\.mongodb\.(?:Mongo|Query))/i,
+  "NoSQL",
+);
 export const ldapInjection = parserCheck(
   "ldap-injection",
   "LDAP injection — parser error differential",
@@ -408,6 +415,7 @@ export const xxe: ScanCheck = {
   },
 };
 export const injectionChecks: readonly ScanCheck[] = [
+  nosqlInjection,
   commandInjection,
   codeInjection,
   elInjection,

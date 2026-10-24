@@ -1,3 +1,11 @@
+import { hostHeaderCheck } from "./host-header-check";
+import { businessChecks } from "./business-checks";
+import { parameterHintsCheck, hiddenParameters } from "./discovery-checks";
+import { jwtKeyChecks } from "./jwt-key-checks";
+import { jwtConfusion } from "./jwt-confusion-check";
+import { corsTrust } from "./cors-trust-check";
+import { nosqlOperators } from "./nosql-checks";
+import { jwtWeakSecret } from "./jwt-secret-check";
 import { dependencyAudit } from "./dependency-checks";
 import { tokenGraphqlChecks } from "./token-graphql-checks";
 import { protocolChecks } from "./protocol-checks";
@@ -354,7 +362,15 @@ const cors: ScanCheck = {
   },
 };
 export const scanChecks: ReadonlyArray<ScanCheck> = [
+  hostHeaderCheck,
   dependencyAudit,
+  jwtWeakSecret,
+  jwtConfusion,
+  ...jwtKeyChecks,
+  ...businessChecks,
+  parameterHintsCheck,
+  hiddenParameters,
+  nosqlOperators,
   ...tokenGraphqlChecks,
   ...protocolChecks,
   ...oastChecks,
@@ -367,6 +383,7 @@ export const scanChecks: ReadonlyArray<ScanCheck> = [
   reflection,
   inputErrors,
   cors,
+  corsTrust,
   ...httpChecks,
   ...injectionChecks,
   ...extendedChecks.filter((check) => check.active),

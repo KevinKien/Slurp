@@ -17,9 +17,11 @@ vi.mock("../lib/scan-api", () => ({
   lookupDependency: vi.fn(() => {
     throw Error("Unexpected dependency lookup");
   }),
+  probeHostHeader: vi.fn(),
   probeHttpProtocol: vi.fn(() => {
     throw Error("Unexpected protocol probe");
   }),
+  publishJwtKey: vi.fn(async () => { throw Error("OAST key hosting not configured in fixture"); }),
   issueOastProbe: vi.fn(async () => {
     throw Error("Unexpected OAST call in a non-OAST scan");
   }),

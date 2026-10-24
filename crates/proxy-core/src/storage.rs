@@ -1639,9 +1639,9 @@ impl TrafficStorage {
 impl TrafficStorage {
  pub fn list_scan_findings(&self,workspace:&str,offset:usize,search:&str,status:&str,severity:&str)->Result<(usize,Vec<serde_json::Value>)>{
   let db=self.lock_for(Some(workspace))?;
-  let filter="r.workspace_id=?1 AND (?2='' OR instr(lower(json_extract(f.value,'$.title') || ' ' || json_extract(r.data,'$.plan.request.url') || ' ' || COALESCE(json_extract(f.value,'$.excerpts'),'')),lower(?2))>0) AND (?3='' OR json_extract(f.value,'$.status')=?3) AND (?4='' OR json_extract(f.value,'$.severity')=?4)";
+  let filter="r.workspace_id=?1 AND (?2='' OR instr(lower(json_extract(f.value,'$.title') || ' ' || COALESCE(json_extract(f.value,'$.endpoint'),json_extract(r.data,'$.plan.request.url')) || ' ' || COALESCE(json_extract(f.value,'$.excerpts'),'')),lower(?2))>0) AND (?3='' OR json_extract(f.value,'$.status')=?3) AND (?4='' OR json_extract(f.value,'$.severity')=?4)";
   let total:usize=db.query_row(&format!("SELECT count(*) FROM scan_runs r,json_each(r.data,'$.findings') f WHERE {filter}"),params![workspace,search,status,severity],|r|r.get(0))?;
-  let mut query=db.prepare(&format!("SELECT json_object('runId',r.id,'startedAt',r.started_at,'url',json_extract(r.data,'$.plan.request.url'),'method',json_extract(r.data,'$.plan.request.method'),'finding',json(f.value)) FROM scan_runs r,json_each(r.data,'$.findings') f WHERE {filter} ORDER BY r.started_at DESC,r.id DESC,CAST(f.key AS INTEGER) ASC LIMIT 100 OFFSET ?5"))?;
+  let mut query=db.prepare(&format!("SELECT json_object('runId',r.id,'startedAt',r.started_at,'url',COALESCE(json_extract(f.value,'$.endpoint'),json_extract(r.data,'$.plan.request.url')),'method',COALESCE(json_extract(f.value,'$.method'),json_extract(r.data,'$.plan.request.method')),'finding',json(f.value)) FROM scan_runs r,json_each(r.data,'$.findings') f WHERE {filter} ORDER BY r.started_at DESC,r.id DESC,CAST(f.key AS INTEGER) ASC LIMIT 100 OFFSET ?5"))?;
   let rows=query.query_map(params![workspace,search,status,severity,offset],|r|r.get::<_,String>(0))?;let data=rows.map(|r|Ok(serde_json::from_str(&r?)?)).collect::<Result<Vec<_>>>()?;Ok((total,data))
  }
 }

@@ -1,7 +1,7 @@
 import type { Exchange, ScanCheck, ScanCheckContext } from "./types";
 import type { HttpRequest } from "../traffic";
 import { compareResponses } from "../response-diff";
-import { mutateParameter, withHeader } from "./parameters";
+import { mutateParameter, withHeader, parameterValue } from "./parameters";
 import { h, text, ok, result, observation, sqlBooleanDifferential } from "./extended-checks";
 const success = (x: Exchange) => ok(x) && x.response!.status >= 200 && x.response!.status < 300;
 function same(a: Exchange, b: Exchange, ctx: ScanCheckContext) {
@@ -10,19 +10,7 @@ function same(a: Exchange, b: Exchange, ctx: ScanCheckContext) {
   return !diff.statusChanged && !diff.bodyChanged;
 }
 function value(ctx: ScanCheckContext): string {
-  const parameter = ctx.parameter!;
-  if (parameter.kind === "query")
-    return new URL(ctx.request.url).searchParams.getAll(parameter.name)[parameter.occurrence] ?? "";
-  let root: unknown = JSON.parse(ctx.request.body);
-  for (const part of parameter.pointer
-    .slice(1)
-    .split("/")
-    .map((x) => x.replace(/~1/g, "/").replace(/~0/g, "~"))) {
-    if (!root || typeof root !== "object" || !Object.hasOwn(root, part))
-      throw Error("Parameter no longer exists.");
-    root = (root as Record<string, unknown>)[part];
-  }
-  return String(root ?? "");
+  return parameterValue(ctx.request, ctx.parameter!);
 }
 export const sqlBoolean: ScanCheck = {
   id: "sql-boolean",

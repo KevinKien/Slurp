@@ -52,18 +52,18 @@ fn check_id(value: &Value) -> bool {
     matches!(
         value.as_str(),
         Some(
-            "cookie-flags"
-                | "403-bypass" | "dependency-audit" | "jwt-signature" | "graphql-introspection" | "graphql-batching" | "http-framing"
+            "parameter-hints" | "hidden-parameters" | "business-negative" | "business-dates" | "jwt-jwk" | "jwt-jku" | "jwt-x5u" | "jwt-kid" | "cookie-flags"
+                | "403-bypass" | "dependency-audit" | "jwt-weak-secret" | "nosql-injection" | "nosql-operators" | "jwt-confusion" | "jwt-signature" | "graphql-introspection" | "graphql-batching" | "http-framing"
                 | "browser-xss" | "dom-xss" | "dom-interaction" | "oast-ssrf" | "oast-xxe"
                 | "error-disclosure"
                 | "security-headers"
                 | "reflection"
                 | "input-errors"
-                | "cors"
+                | "cors" | "cors-trust"
                 | "noauthen"
                 | "js-endpoints"
                 | "js-secrets"
-                | "sql-boolean" | "sql-time" | "header-injection" | "auth-access" | "referer-access" | "client-ip" | "url-override" | "http-methods"
+                | "sql-boolean" | "sql-time" | "header-injection" | "host-header" | "auth-access" | "referer-access" | "client-ip" | "url-override" | "http-methods"
                 | "command-injection" | "code-injection" | "el-injection" | "ldap-injection" | "xpath-injection" | "xml-injection" | "xml-entity" | "xxe" | "xml-injection-body" | "xml-entity-body" | "xxe-body"
                 | "cookie-audit" | "disclosure-audit" | "policy-audit"
                 | "passive-audit" | "sql-injection" | "ssti" | "path-traversal" | "open-redirect"
@@ -89,14 +89,35 @@ pub fn validate_run(id: &str, run: &Value) -> Result<(), Error> {
         ));
     }
     crate::replay::validate_request(&run["plan"]["request"])?;
+    if let Some(key) = run["plan"].get("jwtPublicKey") {
+        if !key.as_str().is_some_and(|s| s.len() <= 16000 && !s.contains("PRIVATE KEY")) {
+            return Err(bad("JWT key must be a public PEM, at most 16 KB"));
+        }
+    }
     if !matches!(run["plan"]["mode"].as_str(), Some("passive" | "active" | "both")) {
         return Err(bad("Invalid scan mode"));
     }
+    let crawl = run["plan"]["crawlBeforeScan"] == true;
+    if let Some(enabled) = run["plan"].get("crawlBeforeScan") {
+        if !enabled.is_boolean() { return Err(bad("Invalid crawl option")); }
+    }
+    let mut crawl_limit = 20;
+    if let Some(options) = run["plan"].get("crawlOptions") {
+        if !options["maxUrls"].as_u64().is_some_and(|n| (1..=50).contains(&n))
+            || !number(&options["maxDepth"], 5) { return Err(bad("Invalid crawl limits")); }
+        crawl_limit = options["maxUrls"].as_u64().unwrap();
+    }
+    if crawl && run["plan"]["allowSending"] != true { return Err(bad("Crawling requires sending permission")); }
+    if let Some(progress) = run.get("crawl") {
+        if !crawl || !matches!(progress["phase"].as_str(), Some("crawling" | "scanning" | "completed"))
+            || !number(&progress["fetched"], crawl_limit) || !number(&progress["queued"], crawl_limit)
+            || !strings(&progress["urls"], crawl_limit as usize, 4096) { return Err(bad("Invalid crawl progress")); }
+    }
     if run["plan"]["mode"] == "passive"
-        && (run["sent"].as_u64().unwrap_or(u64::MAX) > 1
-            || (run["sent"] == 1 && run["plan"]["allowSending"] != true))
+        && (run["sent"].as_u64().unwrap_or(u64::MAX) > if crawl { crawl_limit + 1 } else { 1 }
+            || (run["sent"].as_u64().unwrap_or(0) > 0 && run["plan"]["allowSending"] != true))
     {
-        return Err(bad("Passive scans may fetch one response only"));
+        return Err(bad("Passive scans may only fetch their response or an explicitly enabled bounded crawl"));
     }
     let evidence = run["evidence"]
         .as_array()
@@ -197,11 +218,17 @@ pub fn validate_run(id: &str, run: &Value) -> Result<(), Error> {
     }
     let findings = run["findings"]
         .as_array()
-        .filter(|v| v.len() <= 500)
+        .filter(|v| v.len() <= if crawl { 5000 } else { 500 })
         .ok_or_else(|| bad("Invalid findings"))?;
     let mut finding_ids = HashSet::new();
     let mut fingerprints = HashSet::new();
     for finding in findings {
+        if let Some(endpoint) = finding.get("endpoint") {
+            if !text(endpoint, 12000) || !reqwest::Url::parse(endpoint.as_str().unwrap()).is_ok_and(|url| super::http_target::validate(&url).is_ok()) { return Err(bad("Invalid finding endpoint")); }
+        }
+        if finding.get("method").is_some_and(|v| !text(v, 16)) { return Err(bad("Invalid finding method")); }
+        if finding.get("baselineId").is_some_and(|v| !v.as_str().is_some_and(|id| ids.contains(id))) { return Err(bad("Invalid finding baseline reference")); }
+
         if !text(&finding["id"], 100)
             || !finding_ids.insert(finding["id"].as_str().unwrap())
             || !text(&finding["fingerprint"], 12000)
@@ -245,7 +272,7 @@ pub fn validate_run(id: &str, run: &Value) -> Result<(), Error> {
     }
     let checks = run["checks"]
         .as_array()
-        .filter(|v| v.len() <= 400)
+        .filter(|v| v.len() <= if crawl { 10000 } else { 1000 })
         .ok_or_else(|| bad("Invalid check results"))?;
     for check in checks {
         if !check_id(&check["checkId"])
@@ -376,6 +403,25 @@ mod tests {
         assert!(validate_run("scan-1", &value).is_err());
     }
     #[test]
+    fn passive_crawl_requires_opt_in_and_bounded_progress() {
+        let mut value = run();
+        value["sent"] = json!(3);
+        value["plan"]["crawlBeforeScan"] = json!(true);
+        value["plan"]["crawlOptions"] = json!({"maxUrls": 3, "maxDepth": 1});
+        assert!(validate_run("scan-1", &value).is_err());
+        value["plan"]["allowSending"] = json!(true);
+        value["crawl"] = json!({"phase":"completed","fetched":3,"queued":3,"urls":["https://example.com/items"]});
+        validate_run("scan-1", &value).unwrap();
+        value["sent"] = json!(5);
+        assert!(validate_run("scan-1", &value).is_err());
+        value["sent"] = json!(3);
+        value["crawl"]["fetched"] = json!(4);
+        assert!(validate_run("scan-1", &value).is_err());
+        value["crawl"]["fetched"] = json!(3);
+        value["plan"]["crawlOptions"]["maxUrls"] = json!(51);
+        assert!(validate_run("scan-1", &value).is_err());
+    }
+    #[test]
     fn accepts_new_passive_modules_and_preserves_policy_snapshot() {
         for check in ["cookie-audit", "disclosure-audit", "policy-audit"] {
             let mut value=run();
@@ -398,7 +444,7 @@ mod tests {
     }
     #[test]
     fn validates_new_security_checks_and_bounded_raw_evidence() {
-        for id in ["jwt-signature","graphql-introspection","graphql-batching","http-framing","dependency-audit"] {
+        for id in ["parameter-hints","hidden-parameters","business-negative","business-dates","jwt-jwk","jwt-jku","jwt-x5u","jwt-kid","jwt-confusion","cors-trust","jwt-weak-secret","nosql-injection","nosql-operators","jwt-signature","graphql-introspection","graphql-batching","http-framing","dependency-audit"] {
             let mut value=run();
             value["checks"][0]["checkId"]=json!(id);
             value["findings"][0]["checkId"]=json!(id);
@@ -408,6 +454,16 @@ mod tests {
             value["evidence"][0]["rawRequest"]=json!("x".repeat(16001));
             assert!(validate_run("scan-1",&value).is_err());
         }
+    }
+    #[test]
+    fn rejects_private_and_oversized_jwt_public_keys() {
+        let mut value = run();
+        for key in [json!("-----BEGIN PRIVATE KEY-----"), json!("x".repeat(16001)), json!(42)] {
+            value["plan"]["jwtPublicKey"] = key;
+            assert!(validate_run("scan-1", &value).is_err());
+        }
+        value["plan"]["jwtPublicKey"] = json!("");
+        validate_run("scan-1", &value).unwrap();
     }
     #[test]
     fn validates_phase_five_browser_evidence() {
@@ -573,6 +629,22 @@ mod tests {
                 .0,
             0
         );
+    }
+    #[tokio::test]
+    async fn crawled_finding_endpoint_is_searchable_and_preserved() {
+        let storage = TrafficStorage::new(":memory:", 1024).unwrap();
+        let workspace = storage.create_workspace("Crawl").unwrap().id;
+        let mut value = run();
+        value["findings"][0]["endpoint"] = json!("https://example.com/discovered");
+        value["findings"][0]["method"] = json!("GET");
+        value["findings"][0]["baselineId"] = json!("e1");
+        let _ = put_run(State(storage.clone()), Path((workspace.clone(), "scan-1".into())), Json(value.clone())).await.unwrap();
+        let (total, rows) = storage.list_scan_findings(&workspace, 0, "discovered", "", "").unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(rows[0]["url"], "https://example.com/discovered");
+        assert_eq!(rows[0]["method"], "GET");
+        value["findings"][0]["baselineId"] = json!("missing");
+        assert!(validate_run("scan-1", &value).is_err());
     }
     #[test]
     fn rejects_unsupported_verification_and_dangling_evidence() {

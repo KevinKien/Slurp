@@ -9,7 +9,7 @@ const same = (a: Exchange, b: Exchange, ctx: ScanCheckContext) => {
   const d = compareResponses(a.response!, b.response!, ctx.diffOptions);
   return !d.statusChanged && !d.bodyChanged;
 };
-function decode(part: string): Record<string, unknown> {
+export function decodeJwtPart(part: string): Record<string, unknown> {
   if (part.length > 12000 || !/^[\w-]+$/.test(part)) throw Error("Invalid JWT segment");
   const bytes = Uint8Array.from(atob(part.replace(/-/g, "+").replace(/_/g, "/")), (c) =>
     c.charCodeAt(0),
@@ -18,7 +18,7 @@ function decode(part: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw Error("Invalid JWT JSON");
   return value as Record<string, unknown>;
 }
-const encode = (value: unknown) =>
+export const encodeJwtPart = (value: unknown) =>
   btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(value))))
     .replace(/=/g, "")
     .replace(/\+/g, "-")
@@ -37,14 +37,18 @@ export const jwtSignature: ScanCheck = {
     const [head, payload, signature] = token.split(".") as [string, string, string];
     let header: Record<string, unknown>;
     try {
-      header = decode(head);
-      decode(payload);
+      header = decodeJwtPart(head);
+      decodeJwtPart(payload);
     } catch {
       return result("JWT JSON is malformed or exceeds limits.", true);
     }
     if (typeof header["alg"] !== "string" || header["alg"].toLowerCase() === "none")
       return result("A signed JWT baseline is required.", true);
-    if (!ctx.stable || !ctx.baselines.every(success))
+    if (
+      !ctx.stable ||
+      ctx.baselines.length < 2 ||
+      !ctx.baselines.every((x) => success(x) && text(x).trim().length > 0)
+    )
       return result("Stable successful JWT baselines required.", true);
     const clean = withoutCredentials(ctx.request).request;
     const original = withHeader(clean, "Authorization", `Bearer ${token}`);
@@ -63,7 +67,14 @@ export const jwtSignature: ScanCheck = {
         true,
       );
     const findings = [];
-    for (const mode of ["invalid-signature", "alg-none", "missing-signature"] as const) {
+    for (const mode of [
+      "invalid-signature",
+      "alg-none",
+      "alg-None",
+      "alg-NONE",
+      "alg-nOnE",
+      "missing-signature",
+    ] as const) {
       const rows: Exchange[] = [];
       for (let i = 0; i < 2; i++) {
         // Change a significant signature byte, never only unused base64 padding bits.
@@ -73,8 +84,8 @@ export const jwtSignature: ScanCheck = {
         const modified =
           mode === "invalid-signature"
             ? `${head}.${payload}.${bad}`
-            : mode === "alg-none"
-              ? `${encode({ ...header, alg: "none" })}.${payload}.`
+            : mode.startsWith("alg-")
+              ? `${encodeJwtPart({ ...header, alg: mode.slice(4) })}.${payload}.`
               : `${head}.${payload}.`;
         rows.push(
           await ctx.probe(

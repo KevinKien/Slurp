@@ -48,6 +48,9 @@ pub(crate) async fn resolve(url: &reqwest::Url) -> Result<Vec<SocketAddr>, Strin
 }
 
 pub(crate) async fn client(url: &reqwest::Url, timeout: u64) -> Result<reqwest::Client, String> {
+    client_options(url, timeout, false).await
+}
+pub(crate) async fn client_options(url: &reqwest::Url, timeout:u64, http1:bool)->Result<reqwest::Client,String>{
     let addresses = resolve(url).await?;
     let host = url.host_str().unwrap().trim_matches(['[', ']']);
     let literal = host.parse::<IpAddr>().ok();
@@ -56,6 +59,7 @@ pub(crate) async fn client(url: &reqwest::Url, timeout: u64) -> Result<reqwest::
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_millis(timeout));
+    if http1 { builder = builder.http1_only(); }
     if literal.is_none() {
         builder = builder.resolve_to_addrs(host, &addresses);
     }

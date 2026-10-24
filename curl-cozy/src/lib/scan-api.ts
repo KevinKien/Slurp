@@ -94,3 +94,12 @@ export const lookupDependency = (name: string, version: string) =>
     "/api/scan/dependencies",
     { method: "POST", body: JSON.stringify({ package: name, version }) },
   );
+
+export const publishJwtKey = (material: { kind: "jwks" | "certificate"; body: string }) =>
+  apiFetch<import("./scan/types").OastProbe>("/api/scan/oast/keys", {
+    method: "POST",
+    body: JSON.stringify(material),
+    headers: { "Content-Type": "application/json" },
+  });
+
+export const probeHostHeader = (input:{request:import("./traffic").HttpRequest;header:"host"|"x-forwarded-host";host:string;timeoutMs:number}) => apiFetch<({ok:true}&import("./scan/types").ScanResponse)|{ok:false;error:string}>("/api/scan/host-header",{method:"POST",body:JSON.stringify({request:{...input.request,timeout:Math.min(30000,input.timeoutMs)},header:input.header,host:input.host})});

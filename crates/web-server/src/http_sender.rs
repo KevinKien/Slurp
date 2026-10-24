@@ -75,9 +75,9 @@ async fn read_response(mut response: reqwest::Response, start: Instant) -> Resul
         "setCookies":cookies,"responseBody":String::from_utf8_lossy(&bytes)}),
     )
 }
-async fn execute(data: &Value, url: reqwest::Url, timeout: u64) -> Result<Value, String> {
+async fn execute(data: &Value, url: reqwest::Url, timeout: u64, host: Option<(&str,&str)>) -> Result<Value, String> {
     let start = Instant::now();
-    let client = super::http_target::client(&url, timeout).await?;
+    let client = super::http_target::client_options(&url, timeout, host.is_some()).await?;
     let mut request = client.request(
         data["method"]
             .as_str()
@@ -91,6 +91,7 @@ async fn execute(data: &Value, url: reqwest::Url, timeout: u64) -> Result<Value,
             request = request.header(name, value.as_str().unwrap());
         }
     }
+    if let Some((name,value))=host { request=request.header(name,value); }
     if !["GET", "HEAD"].contains(&data["method"].as_str().unwrap()) {
         request = request.body(data["body"].as_str().unwrap().to_string());
     }
@@ -99,7 +100,7 @@ async fn execute(data: &Value, url: reqwest::Url, timeout: u64) -> Result<Value,
 pub async fn send(Json(data): Json<Value>) -> Json<Value> {
     let result = match validate(&data) {
         Ok((url, timeout)) => {
-            tokio::time::timeout(Duration::from_millis(timeout), execute(&data, url, timeout))
+            tokio::time::timeout(Duration::from_millis(timeout), execute(&data, url, timeout, None))
                 .await
                 .unwrap_or_else(|_| Err("Request timed out".into()))
         }
@@ -107,9 +108,44 @@ pub async fn send(Json(data): Json<Value>) -> Json<Value> {
     };
     Json(result.unwrap_or_else(|error| json!({"ok":false,"error":error})))
 }
+/// Scan-only override: never changes URL, DNS destination, TLS SNI or redirect policy.
+pub(crate) async fn send_host(data:Value, name:&str, host:&str)->Value {
+    if !matches!(name,"host"|"x-forwarded-host") || !host.starts_with("slurp-") || !host.ends_with(".invalid") || host.len()>100 || !host.bytes().all(|c|c.is_ascii_lowercase() || c.is_ascii_digit() || c==b'-' || c==b'.') {
+        return json!({"ok":false,"error":"Invalid scan host override"});
+    }
+    let result=match validate(&data) {
+        Ok((url,timeout))=>tokio::time::timeout(Duration::from_millis(timeout),execute(&data,url,timeout,Some((name,host)))).await.unwrap_or_else(|_|Err("Request timed out".into())),
+        Err(e)=>Err(e),
+    };
+    result.unwrap_or_else(|error|json!({"ok":false,"error":error}))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn scan_host_override_stays_on_original_socket() {
+        use axum::{routing::get, Router, http::HeaderMap};
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route("/probe", get(|headers: HeaderMap| async move {
+            (axum::http::StatusCode::FOUND, [("location", "http://slurp-redirect.invalid/never")],
+                format!("{}|{}", headers["host"].to_str().unwrap(), headers.get("x-forwarded-host").and_then(|v|v.to_str().ok()).unwrap_or("")))
+        }));
+        let server = tokio::spawn(async move {axum::serve(listener, app).await.unwrap();});
+        let input = json!({"method":"GET","url":format!("http://{addr}/probe"),"headers":{"Host":"fake.invalid","X-Forwarded-Host":"fake.invalid"},"body":"","timeout":2000});
+        let normal = send(Json(input.clone())).await.0;
+        assert_eq!(normal["responseBody"],format!("{addr}|"));
+        for header in ["host", "x-forwarded-host"] {
+            let response = send_host(input.clone(),header,"slurp-probe.invalid").await;
+            assert_eq!(response["status"],302);
+            assert_eq!(response["responseBody"],if header=="host" {"slurp-probe.invalid|".to_string()}else{format!("{addr}|slurp-probe.invalid")});
+        }
+        for (name, host) in [("authorization","slurp-probe.invalid"),("host","example.com"),("host","slurp-a.invalid\r\nx: y")] {
+            assert_eq!(send_host(input.clone(),name,host).await["ok"],false);
+        }
+        server.abort();
+    }
     #[tokio::test]
     async fn sends_local_post_and_preserves_redirects_on_custom_ports() {
         use axum::{routing::{get, post}, Router};

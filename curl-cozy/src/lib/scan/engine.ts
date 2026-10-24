@@ -1,10 +1,13 @@
+import { crawl } from "./crawler";
+import { businessKind } from "./business-checks";
+import { scanParameters } from "../scan-selection";
 import { defaultScanPolicy, validatePolicy, policyReason } from "./registry";
 import { flowId } from "../flows";
 import { compareResponses, defaultDiffOptions } from "../response-diff";
 import { validateFinalRequest } from "../intruder";
 import { getScanCheck } from "./checks";
 import { withoutCredentials } from "./http-checks";
-import { mutateParameter, parameterKey } from "./parameters";
+import { mutateParameter, parameterKey, withHeader } from "./parameters";
 import type { HttpRequest } from "../traffic";
 import type {
   CheckResult,
@@ -39,16 +42,56 @@ export function newScanPlan(request: HttpRequest): ScanPlan {
 }
 export function validateScanPlan(plan: ScanPlan) {
   validateFinalRequest(plan.request);
+  if (plan.crawlBeforeScan !== undefined && typeof plan.crawlBeforeScan !== "boolean")
+    throw Error("Invalid crawl option.");
+  if (plan.crawlBeforeScan && !plan.allowSending)
+    throw Error("Crawling requires permission to send requests.");
+  if (
+    plan.crawlOptions &&
+    (!Number.isInteger(plan.crawlOptions.maxUrls) ||
+      plan.crawlOptions.maxUrls < 1 ||
+      plan.crawlOptions.maxUrls > 50 ||
+      !Number.isInteger(plan.crawlOptions.maxDepth) ||
+      plan.crawlOptions.maxDepth < 0 ||
+      plan.crawlOptions.maxDepth > 5)
+  )
+    throw Error("Crawl limits: 1–50 URLs and depth 0–5.");
+  if (
+    plan.jwtPublicKey !== undefined &&
+    (typeof plan.jwtPublicKey !== "string" ||
+      plan.jwtPublicKey.length > 16000 ||
+      /PRIVATE KEY/.test(plan.jwtPublicKey))
+  )
+    throw Error("JWT key must be a public PEM, at most 16 KB; private keys are not accepted.");
+  if (plan.businessReadback) {
+    const config = plan.businessReadback;
+    const url = new URL(config.url);
+    if (
+      url.origin !== new URL(plan.request.url).origin ||
+      url.username ||
+      url.password ||
+      url.hash ||
+      typeof config.parameter !== "string" ||
+      config.parameter.length > 2000 ||
+      !scanParameters(plan.request).some((p) => parameterKey(p) === config.parameter) ||
+      typeof config.pointer !== "string" ||
+      config.pointer.length > 2000 ||
+      (config.pointer !== "" && !/^(?:\/(?:[^~]|~[01])*)+$/.test(config.pointer))
+    )
+      throw Error(
+        "Business read-back requires a same-origin URL, parameter and valid JSON pointer.",
+      );
+  }
   if (plan.policy) validatePolicy(plan.policy);
   if (!["passive", "active", "both"].includes(plan.mode) || typeof plan.allowSending !== "boolean")
     throw Error("Invalid scan mode.");
   if (
     !Array.isArray(plan.checks) ||
     !plan.checks.length ||
-    plan.checks.length > 40 ||
+    plan.checks.length > 64 ||
     new Set(plan.checks).size !== plan.checks.length
   )
-    throw Error("Select 1–40 unique checks.");
+    throw Error("Select 1–64 unique checks.");
   for (const id of plan.checks) {
     const check = getScanCheck(id);
     if (plan.mode === "passive" && check.active)
@@ -61,7 +104,8 @@ export function validateScanPlan(plan: ScanPlan) {
   )
     throw Error("Select at most 10 unique parameters.");
   for (const parameter of plan.parameters) {
-    if (!["query", "json"].includes(parameter.kind)) throw Error("Unsupported scan parameter.");
+    if (!["query", "json", "form"].includes(parameter.kind))
+      throw Error("Unsupported scan parameter.");
     mutateParameter(plan.request, parameter, "scan_validation");
   }
   for (const [n, min, max] of [
@@ -129,13 +173,19 @@ function validateResponse(response: ScanResponse) {
     throw Error("Invalid or oversized scan response.");
 }
 export interface ScanDependencies {
+  hostHeader?: (input: {
+    request: HttpRequest;
+    header: "host" | "x-forwarded-host";
+    host: string;
+    timeoutMs: number;
+  }) => Promise<({ ok: true } & ScanResponse) | { ok: false; error: string }>;
   dependencies?: import("./types").ScanCheckContext["dependencies"];
   protocol?: (input: {
     url: string;
     variant: import("./types").ProtocolVariant;
     timeoutMs: number;
   }) => Promise<import("./types").ProtocolResponse | { ok: false; error: string }>;
-  oast?: Pick<import("./types").OastClient, "issue" | "poll">;
+  oast?: Pick<import("./types").OastClient, "issue" | "poll" | "publishKey">;
   browser?: (input: {
     url: string;
     body: string;
@@ -148,6 +198,7 @@ export interface ScanDependencies {
     request: HttpRequest,
     options?: { timeoutMs: number },
   ) => Promise<({ ok: true } & ScanResponse) | { ok: false; error: string }>;
+  allowCrawlUrl?: (url: string) => boolean;
   isCurrent: () => boolean;
   onChange?: (run: ScanRun) => void;
   /** Called once, after execution. Retrying persistence must not repeat HTTP. */
@@ -157,6 +208,7 @@ export interface ScanDependencies {
 }
 class Halt extends Error {}
 export class ScanEngine {
+  private crawlChild: ScanEngine | undefined;
   private state: ScanRun;
   private original: ScanPlan;
   private started = false;
@@ -166,6 +218,7 @@ export class ScanEngine {
   private wakeups = new Set<() => void>();
   private saveError = "";
   private scripts = new Map<string, Promise<Exchange>>();
+  private jwtResources = new Map<string, Promise<Exchange>>();
   constructor(
     plan: ScanPlan,
     private deps: ScanDependencies,
@@ -221,6 +274,7 @@ export class ScanEngine {
   }
   stop() {
     if (this.started && this.active) {
+      this.crawlChild?.stop();
       this.cancelled = true;
       this.paused = false;
       this.wake();
@@ -228,6 +282,7 @@ export class ScanEngine {
   }
   pause() {
     if (this.active && !this.cancelled) {
+      this.crawlChild?.pause();
       this.paused = true;
       this.emit({ status: "paused" });
       this.wake();
@@ -235,6 +290,7 @@ export class ScanEngine {
   }
   resume() {
     if (this.active && this.paused && !this.cancelled) {
+      this.crawlChild?.resume();
       this.paused = false;
       this.emit({ status: "running" });
       this.wake();
@@ -329,26 +385,45 @@ export class ScanEngine {
     passiveFetch = false,
     scriptResource = false,
     protocolVariant?: import("./types").ProtocolVariant,
+    businessReadback = false,
+    crawlResource = false,
+    hostOverride?: { header: "host" | "x-forwarded-host"; host: string },
   ): Promise<Exchange> => {
     if (
       !this.original.allowSending ||
       (this.original.mode === "passive" &&
-        (!passiveFetch || !!this.original.observed || this.state.sent > 0))
+        !crawlResource &&
+        (!passiveFetch ||
+          !!this.original.observed ||
+          (this.state.sent > 0 && !this.original.crawlBeforeScan)))
     )
       throw Error("This scan cannot send requests.");
     validateFinalRequest(request);
+    if (this.original.crawlBeforeScan && this.deps.allowCrawlUrl?.(request.url) === false)
+      throw new Halt("Crawl scan target is outside Target Scope.");
     // Probes stay on the selected origin/path. Only the method-policy check may use OPTIONS/TRACE.
     const origin = new URL(this.original.request.url),
       target = new URL(request.url);
     if (
-      scriptResource
-        ? request.method !== "GET" ||
+      crawlResource
+        ? !this.original.crawlBeforeScan ||
+          request.method !== "GET" ||
           request.body !== "" ||
-          (origin.origin !== target.origin && !this.deps.allowScriptOrigin?.(target.href))
-        : origin.origin !== target.origin ||
-          origin.pathname !== target.pathname ||
-          (request.method !== this.original.request.method &&
-            !(allowMethodProbe && ["OPTIONS", "TRACE"].includes(request.method)))
+          origin.origin !== target.origin ||
+          this.deps.allowCrawlUrl?.(target.href) === false
+        : businessReadback
+          ? request.method !== "GET" ||
+            request.body !== "" ||
+            target.href !== new URL(this.original.businessReadback!.url).href ||
+            origin.origin !== target.origin
+          : scriptResource
+            ? request.method !== "GET" ||
+              request.body !== "" ||
+              (origin.origin !== target.origin && !this.deps.allowScriptOrigin?.(target.href))
+            : origin.origin !== target.origin ||
+              origin.pathname !== target.pathname ||
+              (request.method !== this.original.request.method &&
+                !(allowMethodProbe && ["OPTIONS", "TRACE"].includes(request.method)))
     )
       throw Error("Scan probes must stay on the selected endpoint and method.");
     await this.ready();
@@ -392,11 +467,18 @@ export class ScanEngine {
         ? protocol.ok
           ? { ...protocol, responseHeaders: {}, responseBody: protocol.rawResponse, setCookies: [] }
           : protocol
-        : await this.deps.send(structuredClone(request), { timeoutMs });
+        : hostOverride
+          ? await this.deps.hostHeader!({
+              request: structuredClone(request),
+              ...hostOverride,
+              timeoutMs,
+            })
+          : await this.deps.send(structuredClone(request), { timeoutMs });
       if (!sent.ok) return await this.capture(request, label, undefined, sent.error);
       validateResponse(sent);
       response = sent;
     } catch (error) {
+      if (error instanceof Halt) throw error;
       return this.capture(
         request,
         label,
@@ -424,6 +506,15 @@ export class ScanEngine {
       this.deps.receive?.(request.url, response.setCookies ?? []);
     return exchange;
   };
+  private parametersForCheck(id: string): (import("./types").ScanParameter | undefined)[] {
+    if (id === "business-negative" || id === "business-dates") {
+      const kind = id === "business-negative" ? "number" : "date";
+      return scanParameters(this.original.request).filter(
+        (p) => businessKind(this.original, p) === kind,
+      );
+    }
+    return getScanCheck(id).perParameter ? this.original.parameters : [undefined];
+  }
   private addResult(result: CheckResult, findings: Finding[] = []) {
     this.emit({
       checks: [...this.state.checks, result],
@@ -435,12 +526,140 @@ export class ScanEngine {
       ],
     });
   }
+  private async crawlBeforeScan() {
+    const allowed = (url: string) => this.deps.allowCrawlUrl?.(url) !== false;
+    const pages = await crawl(
+      this.original.request,
+      this.original.crawlOptions ?? { maxUrls: 20, maxDepth: 2 },
+      (request, label) =>
+        this.probe(request, label, false, false, false, false, undefined, false, true),
+      allowed,
+      (fetched, queued, urls) =>
+        this.emit({
+          message: `Crawling: ${fetched}/${queued} URLs fetched`,
+          crawl: { phase: "crawling", fetched, queued, urls },
+        }),
+    );
+    this.emit({
+      crawl: {
+        phase: "scanning",
+        fetched: pages.length,
+        queued: pages.length,
+        urls: pages.map((p) => p.request.url),
+      },
+      message: `Crawl complete: ${pages.length} URLs; scanning discovered endpoints`,
+    });
+    for (const page of pages) {
+      await this.ready();
+      if (!allowed(page.request.url)) continue;
+      if (
+        page.request.url === new URL(this.original.request.url).href &&
+        this.original.request.method === "GET" &&
+        !this.original.request.body
+      ) {
+        if (page.exchange.response)
+          this.original.observed = {
+            response: page.exchange.response,
+            setCookies: page.exchange.response.setCookies ?? [],
+            duration: page.exchange.response.duration,
+            size: page.exchange.response.size,
+          };
+        continue;
+      }
+      if (!page.exchange.response || page.exchange.evidence.error) continue;
+      const {
+        businessReadback: _readback,
+        observed: _observed,
+        crawlOptions: _limits,
+        ...settings
+      } = this.original;
+      if (this.state.bytes + 256000 > 8_000_000)
+        throw new Halt("Crawl scan evidence budget reached.");
+      const base = this.run;
+      const child = new ScanEngine(
+        {
+          ...settings,
+          crawlBeforeScan: false,
+          request: page.request,
+          observed: {
+            response: page.exchange.response,
+            setCookies: page.exchange.response.setCookies ?? [],
+            duration: page.exchange.response.duration,
+            size: page.exchange.response.size,
+          },
+          parameters: scanParameters(page.request).slice(0, 10),
+        },
+        {
+          ...this.deps,
+          isCurrent: () => !this.cancelled && this.deps.isCurrent() && allowed(page.request.url),
+          send: async (request, options) => {
+            await this.ready();
+            if (!allowed(request.url)) throw new Halt("Crawl scan target is outside Target Scope.");
+            if (
+              this.state.bytes + new TextEncoder().encode(JSON.stringify(request)).length + 512000 >
+              8_000_000
+            )
+              throw new Halt("Crawl scan evidence budget reached.");
+            while (this.nextTime > Date.now()) {
+              await this.wait(this.nextTime - Date.now());
+              await this.ready();
+            }
+            this.nextTime = Date.now() + Math.max(1000 / this.original.rate, this.original.delay);
+            return this.deps.send(request, options);
+          },
+          ...(this.deps.hostHeader && {
+            hostHeader: async (input) => {
+              await this.ready();
+              if (!allowed(input.request.url))
+                throw new Halt("Crawl scan target is outside Target Scope.");
+              if (
+                this.state.bytes +
+                  new TextEncoder().encode(JSON.stringify(input.request)).length +
+                  512000 >
+                8_000_000
+              )
+                throw new Halt("Crawl scan evidence budget reached.");
+              while (this.nextTime > Date.now()) {
+                await this.wait(this.nextTime - Date.now());
+                await this.ready();
+              }
+              this.nextTime = Date.now() + Math.max(1000 / this.original.rate, this.original.delay);
+              return this.deps.hostHeader!(input);
+            },
+          }),
+          onChange: (run) =>
+            this.emit({
+              sent: base.sent + run.sent,
+              bytes: base.bytes + run.bytes,
+              evidence: [...base.evidence, ...run.evidence],
+              findings: [...base.findings, ...run.findings],
+              checks: [...base.checks, ...run.checks],
+              domAudits: [...(base.domAudits ?? []), ...(run.domAudits ?? [])],
+              message: `Scanning crawled endpoint: ${page.request.url}${run.message ? " — " + run.message : ""}`,
+            }),
+          save: async () => {},
+        },
+        this.state.profileId
+          ? { id: this.state.profileId, name: this.state.profileName ?? "" }
+          : undefined,
+      );
+      this.crawlChild = child;
+      const completed = await child.start();
+      this.crawlChild = undefined;
+      if (completed.status === "stopped") throw new Halt(completed.message);
+    }
+    this.emit({
+      message: "Crawl complete; scanning original request",
+      crawl: { ...this.state.crawl!, phase: "scanning" },
+    });
+  }
   async start(): Promise<ScanRun> {
     if (this.started) throw Error("This scan engine has already started.");
     this.started = true;
     this.emit();
     const baselines: Exchange[] = [];
     try {
+      if (this.original.crawlBeforeScan) await this.crawlBeforeScan();
       if (this.original.mode === "passive") {
         this.guard();
         const observed = this.original.observed;
@@ -500,7 +719,7 @@ export class ScanEngine {
         );
       for (const id of this.original.checks) {
         const check = getScanCheck(id),
-          parameters = check.perParameter ? this.original.parameters : [undefined];
+          parameters = this.parametersForCheck(id);
         const blocked = policyReason(id, this.original.policy ?? defaultScanPolicy);
         if (blocked) {
           this.addResult({ checkId: id, status: "skipped", message: blocked, findingIds: [] });
@@ -519,19 +738,57 @@ export class ScanEngine {
           this.addResult({
             checkId: id,
             status: "skipped",
-            message: "No explicit parameters selected.",
+            message: id.startsWith("business-")
+              ? "No matching numeric/date scalar values detected."
+              : "No explicit parameters selected.",
             findingIds: [],
           });
           continue;
         }
         for (const parameter of parameters) {
           await this.ready();
-          const common = { checkId: id, ...(parameter && { parameter }) };
+          const common = {
+            endpoint: this.original.request.url,
+            checkId: id,
+            ...(parameter && { parameter }),
+          };
           try {
             const output = await check.run({
+              ...(id === "host-header" &&
+                this.deps.hostHeader && {
+                  probeHost: (
+                    request: HttpRequest,
+                    header: "host" | "x-forwarded-host",
+                    host: string,
+                    label: string,
+                  ) =>
+                    this.probe(
+                      withHeader(request, header, host),
+                      label,
+                      false,
+                      false,
+                      false,
+                      false,
+                      undefined,
+                      false,
+                      false,
+                      { header, host },
+                    ),
+                }),
               ...(check.active &&
                 this.deps.oast && {
                   oast: {
+                    ...(this.deps.oast.publishKey && {
+                      publishKey: async (material: {
+                        kind: "jwks" | "certificate";
+                        body: string;
+                      }) => {
+                        await this.ready();
+                        const probe = await this.deps.oast!.publishKey!(material);
+                        this.guard();
+                        return probe;
+                      },
+                    }),
                     issue: async () => {
                       await this.ready();
                       const probe = await this.deps.oast!.issue();
@@ -734,6 +991,72 @@ export class ScanEngine {
                     return value;
                   },
                 }),
+              ...(this.original.jwtPublicKey && { jwtPublicKey: this.original.jwtPublicKey }),
+              ...(id === "jwt-confusion" &&
+                check.active && {
+                  loadJwtResource: (raw: string) => {
+                    const url = new URL(raw);
+                    if (
+                      url.origin !== new URL(this.original.request.url).origin ||
+                      url.username ||
+                      url.password ||
+                      url.hash
+                    )
+                      throw Error("JWT discovery must stay on the selected origin.");
+                    if (!this.jwtResources.has(url.href)) {
+                      if (this.jwtResources.size >= 4)
+                        throw Error("JWT discovery resource limit reached.");
+                      this.jwtResources.set(
+                        url.href,
+                        this.probe(
+                          {
+                            method: "GET",
+                            url: url.href,
+                            headers: { Accept: "application/json" },
+                            body: "",
+                          },
+                          "JWT public-key discovery",
+                          false,
+                          false,
+                          false,
+                          true,
+                        ),
+                      );
+                    }
+                    return this.jwtResources.get(url.href)!;
+                  },
+                }),
+              ...(id.startsWith("business-") &&
+                this.original.businessReadback && {
+                  businessReadback: this.original.businessReadback,
+                  readBusiness: (label: string) =>
+                    this.probe(
+                      {
+                        method: "GET",
+                        url: this.original.businessReadback!.url,
+                        headers: {
+                          ...Object.fromEntries(
+                            Object.entries(this.original.request.headers).filter(
+                              ([key]) =>
+                                !/^(?:content-type|content-length|host|if-.*|range|cache-control|pragma|x-http-method-override|x-method-override|x-http-method|x-original-url|x-rewrite-url)$/i.test(
+                                  key,
+                                ),
+                            ),
+                          ),
+                          "Cache-Control": "no-cache, no-store",
+                          Pragma: "no-cache",
+                        },
+                        body: "",
+                      },
+                      label,
+                      false,
+                      false,
+                      false,
+                      false,
+                      undefined,
+                      true,
+                    ),
+                }),
               request: structuredClone(this.original.request),
               baselines: !check.active && observedBaseline ? observedBaseline : baselines,
               stable,
@@ -751,6 +1074,11 @@ export class ScanEngine {
                         "client-ip",
                         "http-methods",
                         "jwt-signature",
+                        "jwt-confusion",
+                        "jwt-jwk",
+                        "jwt-jku",
+                        "jwt-x5u",
+                        "jwt-kid",
                       ].includes(id),
                     )
                 : async () => {
@@ -764,6 +1092,9 @@ export class ScanEngine {
               .map((f) => ({
                 ...f,
                 id: flowId(),
+                endpoint: this.original.request.url,
+                method: this.original.request.method,
+                ...(baselines[0] && { baselineId: baselines[0].evidence.id }),
                 checkId: id,
                 ...(parameter && { parameter }),
                 fingerprint: JSON.stringify([
@@ -800,7 +1131,14 @@ export class ScanEngine {
         }
       }
       this.guard();
-      this.emit({ status: "completed", finishedAt: new Date().toISOString() });
+      this.emit({
+        status: "completed",
+        finishedAt: new Date().toISOString(),
+        ...(this.state.crawl && {
+          crawl: { ...this.state.crawl, phase: "completed" },
+          message: `Crawl and scan completed: ${this.state.crawl.fetched} URLs fetched`,
+        }),
+      });
     } catch (error) {
       this.emit({
         status: error instanceof Halt ? "stopped" : "failed",
@@ -810,11 +1148,12 @@ export class ScanEngine {
     }
     for (const id of this.original.checks) {
       const check = getScanCheck(id);
-      for (const parameter of check.perParameter ? this.original.parameters : [undefined]) {
+      for (const parameter of this.parametersForCheck(id)) {
         if (
           !this.state.checks.some(
             (r) =>
               r.checkId === id &&
+              (!r.endpoint || r.endpoint === this.original.request.url) &&
               (r.parameter ? parameterKey(r.parameter) : "") ===
                 (parameter ? parameterKey(parameter) : ""),
           )

@@ -1,3 +1,4 @@
+import { isFormRequest } from "./scan/parameters";
 import type { HttpRequest } from "./traffic";
 import type { ScanParameter } from "./scan/types";
 /** Bounded, explicit candidates; selection is always a separate user action. */
@@ -12,6 +13,15 @@ export function scanParameters(request: HttpRequest): ScanParameter[] {
     }
   } catch {
     /* Templates may not be URLs until profile resolution. */
+  }
+  if (isFormRequest(request)) {
+    const occurrences = new Map<string, number>();
+    for (const [name] of new URLSearchParams(request.body)) {
+      const occurrence = occurrences.get(name) ?? 0;
+      occurrences.set(name, occurrence + 1);
+      if (name && result.length < 100) result.push({ kind: "form", name, occurrence });
+    }
+    return result;
   }
   try {
     const root: unknown = JSON.parse(request.body);

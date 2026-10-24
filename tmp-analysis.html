@@ -1,0 +1,411 @@
+<title>Slurp v1.2 Analysis</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap">
+<style>
+  /* Layout: single-column document with collapsible sections, metric tiles at top */
+  :root {
+    --bg: #fafaf9;
+    --fg: #1c1917;
+    --fg-muted: #78716c;
+    --surface: #ffffff;
+    --border: #e7e5e4;
+    --accent: #0369a1;
+    --accent-subtle: #e0f2fe;
+    --green: #15803d;
+    --green-bg: #dcfce7;
+    --amber: #b45309;
+    --amber-bg: #fef3c7;
+    --red: #dc2626;
+    --red-bg: #fee2e2;
+    --blue: #1d4ed8;
+    --blue-bg: #dbeafe;
+    --purple: #7c3aed;
+    --purple-bg: #ede9fe;
+    --code-bg: #f5f5f4;
+    --font-body: 'Inter', system-ui, -apple-system, sans-serif;
+    --font-mono: 'IBM Plex Mono', 'SF Mono', 'Consolas', monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0c0a09;
+      --fg: #e7e5e4;
+      --fg-muted: #a8a29e;
+      --surface: #1c1917;
+      --border: #292524;
+      --accent: #38bdf8;
+      --accent-subtle: #0c4a6e;
+      --green: #4ade80;
+      --green-bg: #14532d;
+      --amber: #fbbf24;
+      --amber-bg: #451a03;
+      --red: #f87171;
+      --red-bg: #450a0a;
+      --blue: #60a5fa;
+      --blue-bg: #1e3a5f;
+      --purple: #a78bfa;
+      --purple-bg: #2e1065;
+      --code-bg: #1c1917;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0c0a09;
+    --fg: #e7e5e4;
+    --fg-muted: #a8a29e;
+    --surface: #1c1917;
+    --border: #292524;
+    --accent: #38bdf8;
+    --accent-subtle: #0c4a6e;
+    --green: #4ade80;
+    --green-bg: #14532d;
+    --amber: #fbbf24;
+    --amber-bg: #451a03;
+    --red: #f87171;
+    --red-bg: #450a0a;
+    --blue: #60a5fa;
+    --blue-bg: #1e3a5f;
+    --purple: #a78bfa;
+    --purple-bg: #2e1065;
+    --code-bg: #1c1917;
+    color-scheme: dark;
+  }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-body);
+    line-height: 1.6;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 0;
+    max-width: 900px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 1.75rem; font-weight: 700; margin: 2rem 0 0.25rem; letter-spacing: -0.02em; }
+  h1 span { color: var(--fg-muted); font-weight: 400; font-size: 0.875rem; display: block; margin-top: 0.25rem; letter-spacing: 0; }
+  h2 { font-size: 1.125rem; font-weight: 600; margin: 2rem 0 0.75rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+  h3 { font-size: 0.9375rem; font-weight: 600; margin: 1.25rem 0 0.5rem; }
+  p, li { font-size: 0.875rem; }
+  ul { padding-left: 1.25rem; margin: 0.5rem 0; }
+  li { margin: 0.25rem 0; }
+  code { font-family: var(--font-mono); font-size: 0.8125rem; background: var(--code-bg); padding: 0.125em 0.375em; border-radius: 3px; }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.75rem; margin: 1.25rem 0; }
+  .metric { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 0.875rem 1rem; }
+  .metric-value { font-size: 1.5rem; font-weight: 700; font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
+  .metric-label { font-size: 0.75rem; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 0.125rem; }
+  .tag { display: inline-block; font-size: 0.6875rem; font-weight: 600; padding: 0.125em 0.5em; border-radius: 10px; text-transform: uppercase; letter-spacing: 0.04em; margin-right: 0.25rem; }
+  .tag-new { background: var(--green-bg); color: var(--green); }
+  .tag-modified { background: var(--blue-bg); color: var(--blue); }
+  .tag-backend { background: var(--purple-bg); color: var(--purple); }
+  .tag-frontend { background: var(--accent-subtle); color: var(--accent); }
+  .tag-experimental { background: var(--amber-bg); color: var(--amber); }
+  .tag-test { background: var(--red-bg); color: var(--red); }
+  .section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; margin: 1rem 0; }
+  .section summary { padding: 0.875rem 1rem; cursor: pointer; font-weight: 600; font-size: 0.875rem; list-style: none; display: flex; align-items: center; gap: 0.5rem; }
+  .section summary::before { content: '▸'; font-size: 0.75rem; color: var(--fg-muted); transition: transform 0.15s; }
+  .section[open] summary::before { transform: rotate(90deg); }
+  .section summary::-webkit-details-marker { display: none; }
+  .section-body { padding: 0 1rem 1rem; border-top: 1px solid var(--border); }
+  .file-list { display: flex; flex-direction: column; gap: 0.25rem; margin: 0.5rem 0; }
+  .file { font-family: var(--font-mono); font-size: 0.75rem; padding: 0.25rem 0.5rem; background: var(--code-bg); border-radius: 4px; display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; flex-wrap: wrap; min-width: 0; }
+  .file-path { word-break: break-all; }
+  .file-stat { white-space: nowrap; color: var(--fg-muted); font-size: 0.6875rem; }
+  .file-stat .plus { color: var(--green); }
+  .file-stat .minus { color: var(--red); }
+  table { width: 100%; border-collapse: collapse; font-size: 0.8125rem; margin: 0.75rem 0; }
+  th { text-align: left; font-weight: 600; padding: 0.5rem 0.75rem; border-bottom: 2px solid var(--border); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-muted); }
+  td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .table-wrap { overflow-x: auto; }
+  .plan-section { margin: 1.5rem 0; }
+  .plan-item { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; margin: 0.75rem 0; }
+  .plan-item h4 { font-size: 0.875rem; font-weight: 600; margin: 0 0 0.5rem; }
+  .plan-priority { display: inline-block; font-size: 0.6875rem; font-weight: 600; padding: 0.125em 0.5em; border-radius: 10px; margin-left: 0.5rem; }
+  .priority-high { background: var(--red-bg); color: var(--red); }
+  .priority-medium { background: var(--amber-bg); color: var(--amber); }
+  .priority-low { background: var(--green-bg); color: var(--green); }
+  .check-icon { display: inline-block; width: 1em; text-align: center; margin-right: 0.25em; }
+  .divider { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+  @media (max-width: 500px) {
+    h1 { font-size: 1.375rem; }
+    .metrics { grid-template-columns: repeat(2, 1fr); }
+  }
+</style>
+
+<h1>Slurp v1.2 — Phân tích code & Kế hoạch <span>Nhánh hiện tại: <code>main</code> · 25 file thay đổi · ~1,347 dòng thêm</span></h1>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="metric-value" style="color:var(--green)">18</div>
+    <div class="metric-label">Scan checks mới</div>
+  </div>
+  <div class="metric">
+    <div class="metric-value" style="color:var(--blue)">1,772</div>
+    <div class="metric-label">Dòng code mới (checks)</div>
+  </div>
+  <div class="metric">
+    <div class="metric-value" style="color:var(--purple)">10</div>
+    <div class="metric-label">File mới</div>
+  </div>
+  <div class="metric">
+    <div class="metric-value" style="color:var(--amber)">6</div>
+    <div class="metric-label">Test suite mới</div>
+  </div>
+</div>
+
+<h2>I. Tổng quan thay đổi</h2>
+
+<p>Đây là bản mở rộng lớn của <strong>Scan engine</strong>, thêm 18 kiểm tra bảo mật mới, crawler tự động, hỗ trợ JWT nâng cao, và business logic testing. Thay đổi trải dài cả backend (Rust) và frontend (TypeScript/React).</p>
+
+<details class="section" open>
+  <summary><span class="tag tag-new">Mới</span> 18 Scan checks được thêm</summary>
+  <div class="section-body">
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Check ID</th><th>Mô tả</th><th>Loại</th><th>Trạng thái</th></tr></thead>
+      <tbody>
+        <tr><td><code>host-header</code></td><td>Host header injection — phát hiện server phản chiếu Host vào redirect/HTML</td><td><span class="tag tag-backend">Active</span></td><td><span class="tag tag-experimental">Experimental</span></td></tr>
+        <tr><td><code>parameter-hints</code></td><td>Trích xuất tên parameter từ HTML/JS đã bắt (passive)</td><td><span class="tag tag-frontend">Passive</span></td><td>Stable</td></tr>
+        <tr><td><code>hidden-parameters</code></td><td>Fuzzing tìm hidden parameter và header bằng differential</td><td><span class="tag tag-backend">Intrusive</span></td><td>Stable</td></tr>
+        <tr><td><code>business-negative</code></td><td>Test giới hạn số: số âm, zero, rất lớn, phân số</td><td><span class="tag tag-backend">Intrusive</span></td><td>Stable</td></tr>
+        <tr><td><code>business-dates</code></td><td>Test ngày quá khứ và ngày sai định dạng</td><td><span class="tag tag-backend">Intrusive</span></td><td>Stable</td></tr>
+        <tr><td><code>jwt-jwk</code></td><td>JWT nhúng public key (jwk header) trust</td><td><span class="tag tag-backend">Active</span></td><td><span class="tag tag-experimental">Experimental</span></td></tr>
+        <tr><td><code>jwt-jku</code></td><td>JWT remote JWKS URL trust (dùng OAST collector)</td><td><span class="tag tag-backend">Active</span></td><td><span class="tag tag-experimental">Experimental</span></td></tr>
+        <tr><td><code>jwt-x5u</code></td><td>JWT remote X.509 certificate trust</td><td><span class="tag tag-backend">Active</span></td><td><span class="tag tag-experimental">Experimental</span></td></tr>
+        <tr><td><code>jwt-kid</code></td><td>JWT kid key-lookup injection (null file, SQL literal)</td><td><span class="tag tag-backend">Intrusive</span></td><td><span class="tag tag-experimental">Experimental</span></td></tr>
+        <tr><td><code>jwt-confusion</code></td><td>RSA/HMAC algorithm confusion attack</td><td><span class="tag tag-backend">Active</span></td><td><span class="tag tag-experimental">Experimental</span></td></tr>
+        <tr><td><code>jwt-weak-secret</code></td><td>Brute-force HMAC secret cục bộ (dictionary)</td><td><span class="tag tag-frontend">Passive</span></td><td>Stable</td></tr>
+        <tr><td><code>cors-trust</code></td><td>CORS null origin và hostname bypass</td><td><span class="tag tag-frontend">Light</span></td><td><span class="tag tag-experimental">Experimental</span></td></tr>
+        <tr><td><code>nosql-injection</code></td><td>NoSQL parser differential (MongoDB-style errors)</td><td><span class="tag tag-backend">Active</span></td><td><span class="tag tag-experimental">Experimental</span></td></tr>
+        <tr><td><code>nosql-operators</code></td><td>NoSQL JSON operator interpretation ($regex, $ne)</td><td><span class="tag tag-backend">Active</span></td><td><span class="tag tag-experimental">Experimental</span></td></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+</details>
+
+<details class="section" open>
+  <summary><span class="tag tag-modified">Engine</span> Cải tiến Scan Engine lõi</summary>
+  <div class="section-body">
+    <h3>Crawler tự động</h3>
+    <ul>
+      <li>Crawler mới (<code>crawler.ts</code>, 195 dòng) — thu thập cùng-origin links, scripts, GET forms</li>
+      <li>Cấu hình: tối đa 50 URL, depth 0–5, giới hạn Target Scope</li>
+      <li>Tự động tạo ScanEngine con cho mỗi endpoint được crawl</li>
+      <li>Budget giới hạn evidence 8MB cho crawl scan</li>
+      <li>UI hiển thị tiến trình crawl realtime (fetched/queued/URLs)</li>
+    </ul>
+    <h3>Form parameter support</h3>
+    <ul>
+      <li>Thêm loại parameter <code>form</code> cho <code>application/x-www-form-urlencoded</code></li>
+      <li>Hỗ trợ <code>mutateParameter</code>, <code>parameterValue</code>, <code>isFormRequest</code></li>
+      <li>Giới hạn checks tăng từ 40 → 64</li>
+    </ul>
+    <h3>JWT nâng cao</h3>
+    <ul>
+      <li>RSA material parser mới (<code>rsa-material.ts</code>, 141 dòng) — parse SPKI/PKCS#1/X.509</li>
+      <li>OAST collector hỗ trợ hosting JWKS và certificates cho jku/x5u attacks</li>
+      <li>User cung cấp RSA public key qua UI (validate, reject private keys)</li>
+      <li>Web Crypto dùng cho local key generation và signing</li>
+    </ul>
+    <h3>Business logic testing</h3>
+    <ul>
+      <li>Tự động phát hiện numeric/date fields (businessKind heuristic)</li>
+      <li>Business read-back verification: GET endpoint xác nhận thay đổi persist</li>
+      <li>JSON pointer cho truy xuất field cụ thể trong response</li>
+      <li><code>mutateNumber</code> helper giữ đúng kiểu (string vs number) trong JSON</li>
+    </ul>
+    <h3>Host header injection</h3>
+    <ul>
+      <li>Backend mới: <code>send_host()</code> gửi request với Host/X-Forwarded-Host override, pinned to original socket</li>
+      <li>HTTP/1.1 only khi override Host header (tránh HTTP/2 pseudo-header conflict)</li>
+      <li>Strict validation: chỉ <code>slurp-*.invalid</code> hostnames, reject CRLF injection</li>
+    </ul>
+  </div>
+</details>
+
+<details class="section">
+  <summary><span class="tag tag-backend">Rust</span> Thay đổi Backend (7 files)</summary>
+  <div class="section-body">
+    <div class="file-list">
+      <div class="file"><span class="file-path">crates/web-server/src/scan.rs</span><span class="file-stat"><span class="plus">+92</span></span></div>
+      <div class="file"><span class="file-path">crates/web-server/src/auto_audit.rs</span><span class="file-stat"><span class="plus">+112</span></span></div>
+      <div class="file"><span class="file-path">crates/web-server/src/http_sender.rs</span><span class="file-stat"><span class="plus">+42</span></span></div>
+      <div class="file"><span class="file-path">crates/web-server/src/oast.rs</span><span class="file-stat"><span class="plus">+86</span></span></div>
+      <div class="file"><span class="file-path">crates/web-server/src/http_target.rs</span><span class="file-stat"><span class="plus">+4</span></span></div>
+      <div class="file"><span class="file-path">crates/web-server/src/lib.rs</span><span class="file-stat"><span class="plus">+4</span></span></div>
+      <div class="file"><span class="file-path">crates/proxy-core/src/storage.rs</span><span class="file-stat"><span class="plus">+4</span></span></div>
+    </div>
+    <div class="file-list" style="margin-top:0.75rem">
+      <div class="file" style="background:var(--green-bg)"><span class="file-path">crates/web-server/src/host_audit.rs</span><span class="file-stat"><span class="tag tag-new">mới</span></span></div>
+      <div class="file" style="background:var(--green-bg)"><span class="file-path">crates/web-server/src/crlf_audit.rs</span><span class="file-stat"><span class="tag tag-new">mới</span></span></div>
+    </div>
+    <h3>Chi tiết</h3>
+    <ul>
+      <li><strong>scan.rs</strong> — Validate 18 check ID mới, crawl fields (<code>crawlBeforeScan</code>, <code>crawlOptions</code>, <code>crawl</code> progress), <code>jwtPublicKey</code> validation (reject private keys, max 16KB), finding <code>endpoint</code>/<code>method</code>/<code>baselineId</code> fields, tăng giới hạn findings/checks khi crawl</li>
+      <li><strong>auto_audit.rs</strong> — Generic <code>start_header_audit()</code> cho cả CRLF và Host header auto-audit, chạy song song với JS/API audit hiện tại</li>
+      <li><strong>http_sender.rs</strong> — <code>send_host()</code> API mới cho scan host override, strict hostname validation (<code>slurp-*.invalid</code>), HTTP/1.1 only</li>
+      <li><strong>oast.rs</strong> — <code>issue_key()</code> endpoint hosting JWKS/certificate material qua OAST probe URLs, validation RSA public-only, serve đúng content-type</li>
+      <li><strong>http_target.rs</strong> — <code>client_options()</code> hỗ trợ HTTP/1.1 only mode</li>
+      <li><strong>lib.rs</strong> — Register 2 module mới + 2 API routes (<code>/api/scan/host-header</code>, <code>/api/scan/oast/keys</code>)</li>
+    </ul>
+  </div>
+</details>
+
+<details class="section">
+  <summary><span class="tag tag-frontend">Frontend</span> Thay đổi UI & Engine (15 files)</summary>
+  <div class="section-body">
+    <div class="file-list">
+      <div class="file"><span class="file-path">curl-cozy/src/lib/scan/engine.ts</span><span class="file-stat"><span class="plus">+377</span></span></div>
+      <div class="file"><span class="file-path">curl-cozy/src/components/scan.tsx</span><span class="file-stat"><span class="plus">+218</span></span></div>
+      <div class="file"><span class="file-path">curl-cozy/src/lib/scan/registry.ts</span><span class="file-stat"><span class="plus">+117</span></span></div>
+      <div class="file"><span class="file-path">curl-cozy/src/lib/scan/parameters.ts</span><span class="file-stat"><span class="plus">+79</span></span></div>
+      <div class="file"><span class="file-path">curl-cozy/src/lib/scan/types.ts</span><span class="file-stat"><span class="plus">+45</span></span></div>
+      <div class="file"><span class="file-path">curl-cozy/src/components/scan-profiles.tsx</span><span class="file-stat"><span class="plus">+39</span></span></div>
+      <div class="file"><span class="file-path">curl-cozy/src/components/scan-findings-report.tsx</span><span class="file-stat"><span class="plus">+33</span></span></div>
+      <div class="file"><span class="file-path">curl-cozy/src/lib/scan/token-graphql-checks.ts</span><span class="file-stat"><span class="plus">+27</span></span></div>
+    </div>
+    <h3>10 file scan check mới (1,772 dòng)</h3>
+    <div class="file-list">
+      <div class="file" style="background:var(--green-bg)"><span class="file-path">jwt-confusion-check.ts</span><span class="file-stat">309 dòng</span></div>
+      <div class="file" style="background:var(--green-bg)"><span class="file-path">business-checks.ts</span><span class="file-stat">243 dòng</span></div>
+      <div class="file" style="background:var(--green-bg)"><span class="file-path">jwt-key-checks.ts</span><span class="file-stat">241 dòng</span></div>
+      <div class="file" style="background:var(--green-bg)"><span class="file-path">crawler.ts</span><span class="file-stat">195 dòng</span></div>
+      <div class="file" style="background:var(--green-bg)"><span class="file-path">discovery-checks.ts</span><span class="file-stat">193 dòng</span></div>
+      <div class="file" style="background:var(--green-bg)"><span class="file-path">rsa-material.ts</span><span class="file-stat">141 dòng</span></div>
+      <div class="file" style="background:var(--green-bg)"><span class="file-path">host-header-check.ts</span><span class="file-stat">140 dòng</span></div>
+      <div class="file" style="background:var(--green-bg)"><span class="file-path">jwt-secret-check.ts</span><span class="file-stat">106 dòng</span></div>
+      <div class="file" style="background:var(--green-bg)"><span class="file-path">cors-trust-check.ts</span><span class="file-stat">103 dòng</span></div>
+      <div class="file" style="background:var(--green-bg)"><span class="file-path">nosql-checks.ts</span><span class="file-stat">101 dòng</span></div>
+    </div>
+  </div>
+</details>
+
+<details class="section">
+  <summary><span class="tag tag-test">Tests</span> Test coverage (6 test files mới)</summary>
+  <div class="section-body">
+    <div class="file-list">
+      <div class="file" style="background:var(--green-bg)"><span class="file-path">scan-business-discovery.test.ts</span><span class="file-stat"><span class="tag tag-new">mới</span></span></div>
+      <div class="file" style="background:var(--green-bg)"><span class="file-path">scan-crawler.test.ts</span><span class="file-stat"><span class="tag tag-new">mới</span></span></div>
+      <div class="file" style="background:var(--green-bg)"><span class="file-path">scan-expansion.test.ts</span><span class="file-stat"><span class="tag tag-new">mới</span></span></div>
+      <div class="file" style="background:var(--green-bg)"><span class="file-path">scan-host-header.test.ts</span><span class="file-stat"><span class="tag tag-new">mới</span></span></div>
+      <div class="file" style="background:var(--green-bg)"><span class="file-path">scan-jwt-confusion.test.ts</span><span class="file-stat"><span class="tag tag-new">mới</span></span></div>
+      <div class="file" style="background:var(--green-bg)"><span class="file-path">scan-jwt-key-sources.test.ts</span><span class="file-stat"><span class="tag tag-new">mới</span></span></div>
+    </div>
+    <div class="file-list" style="margin-top:0.5rem">
+      <div class="file"><span class="file-path">scan-findings-report.test.tsx</span><span class="file-stat"><span class="plus">+16</span></span></div>
+      <div class="file"><span class="file-path">scan-provider.test.tsx</span><span class="file-stat"><span class="plus">+2</span></span></div>
+      <div class="file"><span class="file-path">scan-ui.test.tsx</span><span class="file-stat"><span class="plus">+28</span></span></div>
+    </div>
+    <p>Backend tests (Rust) cũng được thêm inline: <code>scan.rs</code> thêm 4 test mới (crawl validation, JWT key rejection, finding endpoint search), <code>http_sender.rs</code> thêm test host override stays on original socket, <code>oast.rs</code> thêm 2 tests (material validation, hosting lifecycle).</p>
+  </div>
+</details>
+
+<hr class="divider">
+
+<h2>II. Ý tưởng & Kế hoạch thực hiện</h2>
+
+<p>Dựa trên trạng thái hiện tại, đây là những hướng phát triển tiếp theo được ưu tiên:</p>
+
+<div class="plan-section">
+  <h3>🔴 Ưu tiên cao — Hoàn thiện bản release</h3>
+
+  <div class="plan-item">
+    <h4><span class="check-icon">1</span> Chạy toàn bộ test suite và fix failures <span class="plan-priority priority-high">Quan trọng</span></h4>
+    <p>Chạy <code>cargo test</code> (backend) và <code>npx vitest run</code> (frontend) để xác nhận mọi thứ pass. Nhiều file thay đổi cùng lúc, cần đảm bảo không có regression. Cũng cần chạy <code>cargo clippy</code> để bắt warning.</p>
+  </div>
+
+  <div class="plan-item">
+    <h4><span class="check-icon">2</span> Cập nhật RELEASE_NOTES.md cho v1.2 <span class="plan-priority priority-high">Quan trọng</span></h4>
+    <p>File <code>RELEASE_NOTES.md</code> hiện chỉ chứa nội dung v1.0.1. Cần viết release notes mới bao gồm: 18 scan checks mới, crawler, JWT key-source attacks, business logic testing, form parameter support, host header injection, và CORS trust checks.</p>
+  </div>
+
+  <div class="plan-item">
+    <h4><span class="check-icon">3</span> Cập nhật documentation (<code>/docs/scan.html</code>) <span class="plan-priority priority-high">Quan trọng</span></h4>
+    <p>Tài liệu scan cần document: cách dùng crawler, cấu hình business read-back, cung cấp JWT public key, các scan profile mới, và giải thích các check experimental.</p>
+  </div>
+
+  <div class="plan-item">
+    <h4><span class="check-icon">4</span> Commit và tạo version tag <span class="plan-priority priority-high">Quan trọng</span></h4>
+    <p>25 file thay đổi chưa commit. Nên chia thành vài commit có ý nghĩa hoặc một commit lớn với message mô tả rõ. Cập nhật version number trong codebase.</p>
+  </div>
+</div>
+
+<div class="plan-section">
+  <h3>🟡 Ưu tiên trung bình — Cải thiện chất lượng</h3>
+
+  <div class="plan-item">
+    <h4><span class="check-icon">5</span> Test thủ công end-to-end trên real server <span class="plan-priority priority-medium">Medium</span></h4>
+    <p>Các check experimental (jwt-confusion, host-header, cors-trust, nosql) cần được test trên ứng dụng thực. Set up một vulnerable test app (DVWA, Juice Shop, hoặc custom) để verify findings.</p>
+  </div>
+
+  <div class="plan-item">
+    <h4><span class="check-icon">6</span> Tăng test coverage cho crawler edge cases <span class="plan-priority priority-medium">Medium</span></h4>
+    <ul>
+      <li>Crawl với redirect chains</li>
+      <li>Crawl gặp non-HTML responses (JSON APIs, binary)</li>
+      <li>Crawl timeout và error handling</li>
+      <li>Evidence budget exceeded khi crawl nhiều endpoint</li>
+      <li>Concurrency: crawl child engine bị stop/pause</li>
+    </ul>
+  </div>
+
+  <div class="plan-item">
+    <h4><span class="check-icon">7</span> Refactor auto_audit.rs — DRY pattern <span class="plan-priority priority-medium">Medium</span></h4>
+    <p><code>start_header_audit()</code> duplicate khá nhiều logic từ worker chính. Xem xét extract generic audit runner pattern dùng trait hoặc closure để giảm code lặp.</p>
+  </div>
+
+  <div class="plan-item">
+    <h4><span class="check-icon">8</span> Scan profiles UX — Auto-detect applicable checks <span class="plan-priority priority-medium">Medium</span></h4>
+    <p>Hiện user phải chọn profile thủ công. Có thể auto-detect: nếu request có JWT → suggest JWT profiles, nếu JSON body → suggest NoSQL/business checks, nếu có CORS headers → suggest CORS checks.</p>
+  </div>
+</div>
+
+<div class="plan-section">
+  <h3>🟢 Ưu tiên thấp — Tính năng tương lai</h3>
+
+  <div class="plan-item">
+    <h4><span class="check-icon">9</span> Scan report export (PDF/HTML) <span class="plan-priority priority-low">Low</span></h4>
+    <p>Export findings thành report chuyên nghiệp với severity ratings, evidence screenshots, remediation guidance. Hữu ích cho pentesting reports.</p>
+  </div>
+
+  <div class="plan-item">
+    <h4><span class="check-icon">10</span> Scheduled/recurring scans <span class="plan-priority priority-low">Low</span></h4>
+    <p>Cho phép schedule scan định kỳ trên saved requests để phát hiện regression. Cần backend cron job hoặc timer.</p>
+  </div>
+
+  <div class="plan-item">
+    <h4><span class="check-icon">11</span> Scan comparison (diff between runs) <span class="plan-priority priority-low">Low</span></h4>
+    <p>So sánh 2 scan runs trên cùng endpoint để phát hiện findings mới/đã fix. Hữu ích sau khi dev fix vulnerability.</p>
+  </div>
+
+  <div class="plan-item">
+    <h4><span class="check-icon">12</span> SSRF và blind injection improvements <span class="plan-priority priority-low">Low</span></h4>
+    <p>Mở rộng OAST checks cho: blind SSRF qua redirect chains, blind SQL injection qua DNS exfiltration, SMTP header injection.</p>
+  </div>
+
+  <div class="plan-item">
+    <h4><span class="check-icon">13</span> WebSocket scan support <span class="plan-priority priority-low">Low</span></h4>
+    <p>Scan engine hiện chỉ hỗ trợ HTTP. WebSocket messages cũng có thể chứa injection vectors, authorization bypass, v.v.</p>
+  </div>
+</div>
+
+<hr class="divider">
+
+<h2>III. Đề xuất thứ tự thực hiện</h2>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Bước</th><th>Việc</th><th>Ước lượng</th><th>Ghi chú</th></tr></thead>
+  <tbody>
+    <tr><td style="font-variant-numeric:tabular-nums">1</td><td>Chạy tests, fix failures</td><td>30 phút</td><td>Phải pass 100% trước khi tiến hành</td></tr>
+    <tr><td style="font-variant-numeric:tabular-nums">2</td><td>Viết RELEASE_NOTES v1.2</td><td>20 phút</td><td>Dựa trên phân tích ở trên</td></tr>
+    <tr><td style="font-variant-numeric:tabular-nums">3</td><td>Cập nhật docs/scan.html</td><td>30 phút</td><td>Tài liệu cho user</td></tr>
+    <tr><td style="font-variant-numeric:tabular-nums">4</td><td>Commit + tag v1.2</td><td>10 phút</td><td>1 commit lớn hoặc chia nhỏ theo feature</td></tr>
+    <tr><td style="font-variant-numeric:tabular-nums">5</td><td>E2E testing trên real app</td><td>1–2 giờ</td><td>Verify experimental checks</td></tr>
+    <tr><td style="font-variant-numeric:tabular-nums">6</td><td>Crawler edge case tests</td><td>1 giờ</td><td>Tăng độ tin cậy</td></tr>
+    <tr><td style="font-variant-numeric:tabular-nums">7</td><td>Auto-detect scan profiles</td><td>2 giờ</td><td>UX improvement</td></tr>
+    <tr><td style="font-variant-numeric:tabular-nums">8</td><td>Refactor auto_audit DRY</td><td>1 giờ</td><td>Code quality</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p style="color:var(--fg-muted); font-size:0.75rem; margin-top:2rem; text-align:center;">Phân tích từ nhánh <code>main</code> · Slurp HTTP Debugger</p>

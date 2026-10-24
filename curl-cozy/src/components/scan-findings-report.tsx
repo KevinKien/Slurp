@@ -51,7 +51,6 @@ export function ScanFindingsReport({
   }, [focusFinding]);
   const findings = run.findings.filter((f) => filter === "all" || f.status === filter);
   const finding = findings.find((f) => f.id === selected) ?? findings[0];
-  const url = new URL(run.plan.request.url);
   return (
     <div className="min-w-0 overflow-hidden rounded border border-border">
       <div className="max-h-60 overflow-auto">
@@ -89,14 +88,16 @@ export function ScanFindingsReport({
                     {f.title}
                   </button>
                 </td>
-                <td className="p-3 whitespace-nowrap">{url.origin}</td>
+                <td className="p-3 whitespace-nowrap">
+                  {new URL(f.endpoint ?? run.plan.request.url).origin}
+                </td>
                 <td className="p-3 font-mono break-all min-w-48">
                   {f.checkId === "js-endpoints"
                     ? (f.excerpts
                         .find((x) => x.startsWith("Endpoint candidate:"))
                         ?.slice(19)
-                        .trim() ?? url.pathname)
-                    : url.pathname}
+                        .trim() ?? new URL(f.endpoint ?? run.plan.request.url).pathname)
+                    : new URL(f.endpoint ?? run.plan.request.url).pathname}
                 </td>
                 <td className="p-3 font-mono whitespace-nowrap">
                   {f.parameter ? parameterKey(f.parameter) : "Request / response"}
@@ -127,10 +128,18 @@ function FindingDetail({ run, finding: f }: { run: ScanRun; finding: Finding }) 
   const index = Number(tab.split(":")[1]);
   const selected =
     evidence[index] ??
-    evidence.find((e) => !run.baselineIds.includes(e.id) && !/control|baseline/i.test(e.label)) ??
+    evidence.find(
+      (e) =>
+        e.id !== f.baselineId &&
+        !run.baselineIds.includes(e.id) &&
+        !/control|baseline/i.test(e.label),
+    ) ??
     evidence[0];
-  const baseline = run.evidence.find((e) => run.baselineIds.includes(e.id) && e.response);
-  const original = value(f, run.plan.request);
+  const baseline = run.evidence.find(
+    (e) => (f.baselineId ? e.id === f.baselineId : run.baselineIds.includes(e.id)) && e.response,
+  );
+  const originalRequest = baseline?.request ?? run.plan.request;
+  const original = value(f, originalRequest);
   const payload = selected ? value(f, selected.request) : null;
   return (
     <Tabs value={tab} onValueChange={setTab} className="min-w-0 border-t border-border">
@@ -185,9 +194,9 @@ function FindingDetail({ run, finding: f }: { run: ScanRun; finding: Finding }) 
                   <div className="h-full">
                     <CodePane
                       compareTo={{
-                        body: scanRequestRaw({ ...e, request: run.plan.request }),
-                        raw: scanRequestRaw({ ...e, request: run.plan.request }),
-                        headers: run.plan.request.headers,
+                        body: scanRequestRaw({ ...e, request: originalRequest }),
+                        raw: scanRequestRaw({ ...e, request: originalRequest }),
+                        headers: originalRequest.headers,
                       }}
                       highlightTerms={(() => {
                         const payload = value(f, e.request);
@@ -358,7 +367,9 @@ function FindingDetail({ run, finding: f }: { run: ScanRun; finding: Finding }) 
             <>
               <p className="break-words font-medium">
                 {selected.label}
-                {run.baselineIds.includes(selected.id) ? " · Baseline" : ""}
+                {selected.id === f.baselineId || run.baselineIds.includes(selected.id)
+                  ? " · Baseline"
+                  : ""}
               </p>
               <p>
                 {selected.response?.status ?? "Error"} · {selected.duration} ms · {selected.size}{" "}

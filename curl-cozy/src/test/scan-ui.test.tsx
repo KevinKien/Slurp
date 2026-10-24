@@ -139,3 +139,31 @@ it("prepares a passive scan without sending when no response exists", async () =
   expect(ctx.draft?.observed).toBeUndefined();
   expect(mock.send).not.toHaveBeenCalled();
 });
+
+it("keeps crawl off by default and requires sending opt-in for a passive crawl", async () => {
+  render(
+    <ScanProvider>
+      <Probe />
+      <ScanView />
+    </ScanProvider>,
+  );
+  await act(async () =>
+    ctx.prepare(async () => ({
+      ...request,
+      status: 200,
+      responseHeaders: { "content-type": "text/html" },
+      responseBody: "<h1>Captured</h1>",
+    })),
+  );
+  const toggle = screen.getByLabelText("Crawl before scanning");
+  expect(toggle).not.toBeChecked();
+  expect(mock.send).not.toHaveBeenCalled();
+  fireEvent.click(toggle);
+  expect(screen.getByLabelText("Crawl maximum URLs")).toHaveValue(20);
+  expect(screen.getByRole("button", { name: "Crawl and scan" })).toBeDisabled();
+  fireEvent.click(screen.getByLabelText("Allow crawl requests"));
+  fireEvent.click(screen.getByRole("button", { name: "Crawl and scan" }));
+  await waitFor(() => expect(ctx.run?.status).toBe("completed"));
+  expect(mock.send).toHaveBeenCalledTimes(1);
+  expect(ctx.run?.crawl?.fetched).toBe(1);
+});

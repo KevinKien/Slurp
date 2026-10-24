@@ -183,3 +183,19 @@ it("shows correlated OAST callbacks beside their probe request", () => {
   expect(screen.getByText(/GET \/slurp-oast\/probe1/)).toBeInTheDocument();
   expect(screen.getByText(/192.0.2.10/)).toBeInTheDocument();
 });
+
+it("shows the discovered endpoint instead of labeling every finding with the crawl seed", () => {
+  const r = run();
+  r.findings = [
+    {
+      ...finding("discovered"),
+      endpoint: "http://localhost:8088/discovered",
+      method: "GET",
+      baselineId: "base",
+    },
+  ];
+  render(<ScanFindingsReport run={r} filter="all" focusFinding="" />);
+  expect(
+    within(screen.getByRole("table", { name: "Scan findings" })).getByText("/discovered"),
+  ).toBeInTheDocument();
+});

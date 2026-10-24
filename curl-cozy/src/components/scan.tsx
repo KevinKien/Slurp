@@ -180,10 +180,183 @@ export function ScanView() {
               </details>
               <fieldset className="space-y-4">
                 <ScanProfilePicker plan={plan} onChange={scan.updateDraft} />
-                {plan.checks.some((id) => id.startsWith("oast-")) && <OastStatus />}
+                <div className="space-y-3 rounded border p-3">
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      aria-label="Crawl before scanning"
+                      checked={plan.crawlBeforeScan ?? false}
+                      onChange={(e) => update({ crawlBeforeScan: e.target.checked })}
+                    />
+                    Crawl before scanning
+                  </label>
+                  {plan.crawlBeforeScan && (
+                    <>
+                      <p className="text-xs text-muted-foreground">
+                        Discover same-origin links, scripts and GET forms within Target Scope, then
+                        scan the collected responses/endpoints with this profile. GET requests can
+                        change server state. Scripts are not executed and POST forms are not
+                        submitted.
+                      </p>
+                      <div className="flex flex-wrap gap-3">
+                        <label className="text-xs">
+                          Maximum URLs (including start URL)
+                          <input
+                            aria-label="Crawl maximum URLs"
+                            className={`${input} block w-28`}
+                            type="number"
+                            min={1}
+                            max={50}
+                            value={plan.crawlOptions?.maxUrls ?? 20}
+                            onChange={(e) =>
+                              update({
+                                crawlOptions: {
+                                  maxUrls: Number(e.target.value),
+                                  maxDepth: plan.crawlOptions?.maxDepth ?? 2,
+                                },
+                              })
+                            }
+                          />
+                        </label>
+                        <label className="text-xs">
+                          Maximum depth
+                          <input
+                            aria-label="Crawl maximum depth"
+                            className={`${input} block w-28`}
+                            type="number"
+                            min={0}
+                            max={5}
+                            value={plan.crawlOptions?.maxDepth ?? 2}
+                            onChange={(e) =>
+                              update({
+                                crawlOptions: {
+                                  maxUrls: plan.crawlOptions?.maxUrls ?? 20,
+                                  maxDepth: Number(e.target.value),
+                                },
+                              })
+                            }
+                          />
+                        </label>
+                      </div>
+                      <label className="flex items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          aria-label="Allow crawl requests"
+                          checked={plan.allowSending}
+                          onChange={(e) => update({ allowSending: e.target.checked })}
+                        />
+                        I allow crawling and the selected scan checks on discovered endpoints.
+                      </label>
+                    </>
+                  )}
+                </div>
+                {plan.checks.includes("jwt-confusion") && (
+                  <label className="block space-y-2 text-sm">
+                    <span>JWT RSA public key or certificate (PEM)</span>
+                    <textarea
+                      aria-label="JWT RSA public key"
+                      className={`${input} w-full min-h-32 font-mono text-xs`}
+                      placeholder="-----BEGIN PUBLIC KEY-----"
+                      maxLength={16000}
+                      value={plan.jwtPublicKey ?? ""}
+                      onChange={(e) => update({ jwtPublicKey: e.target.value })}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Optional: provide the server's RSA public key or certificate, or leave empty
+                      for same-origin JWKS discovery. Slurp verifies the original JWT first. Private
+                      keys are not accepted.
+                    </p>
+                  </label>
+                )}
+                {plan.checks.some((id) => id.startsWith("business-")) && (
+                  <details className="space-y-2 rounded border p-3">
+                    <summary className="cursor-pointer text-sm">
+                      Business read-back verification (optional)
+                    </summary>
+                    <p className="text-xs text-muted-foreground">
+                      Configure a same-origin GET endpoint returning the existing resource. Uses the
+                      captured credentials. Select one input and the exact JSON pointer to its saved
+                      value. Replaying the original request attempts restoration but cannot undo
+                      other side effects.
+                    </p>
+                    <label className="block text-sm">
+                      Read-back GET URL
+                      <input
+                        aria-label="Business read-back URL"
+                        className={`${input} w-full`}
+                        placeholder="https://target.example/api/resource/123"
+                        value={plan.businessReadback?.url ?? ""}
+                        onChange={(e) =>
+                          update({
+                            businessReadback: e.target.value
+                              ? {
+                                  url: e.target.value,
+                                  parameter: plan.businessReadback?.parameter ?? "",
+                                  pointer: plan.businessReadback?.pointer ?? "",
+                                }
+                              : undefined,
+                          })
+                        }
+                      />
+                    </label>
+                    {plan.businessReadback && (
+                      <>
+                        <label className="block text-sm">
+                          Input to verify
+                          <select
+                            aria-label="Business read-back input"
+                            className={`${input} w-full`}
+                            value={plan.businessReadback.parameter}
+                            onChange={(e) =>
+                              update({
+                                businessReadback: {
+                                  ...plan.businessReadback!,
+                                  parameter: e.target.value,
+                                },
+                              })
+                            }
+                          >
+                            <option value="">Select an input</option>
+                            {scanParameters(plan.request).map((p) => (
+                              <option key={parameterKey(p)} value={parameterKey(p)}>
+                                {parameterKey(p)}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="block text-sm">
+                          Response JSON pointer
+                          <input
+                            aria-label="Business read-back JSON pointer"
+                            className={`${input} w-full`}
+                            placeholder="/data/quantity"
+                            value={plan.businessReadback.pointer}
+                            onChange={(e) =>
+                              update({
+                                businessReadback: {
+                                  ...plan.businessReadback!,
+                                  pointer: e.target.value,
+                                },
+                              })
+                            }
+                          />
+                        </label>
+                      </>
+                    )}
+                  </details>
+                )}
+                {plan.checks.some(
+                  (id) => id.startsWith("oast-") || id === "jwt-jku" || id === "jwt-x5u",
+                ) && <OastStatus />}
                 {plan.mode !== "passive" && <ProfileSelector />}
                 {plan.mode !== "passive" && (
                   <>
+                    {plan.checks.some((id) => id.startsWith("business-")) && (
+                      <p className="text-xs text-muted-foreground">
+                        Business checks automatically test all detected numeric/date fields (up to
+                        100), regardless of their names or the selections below.
+                      </p>
+                    )}
                     <div>
                       <h2 className="text-sm font-medium">
                         Parameters to test ({plan.parameters.length}/10)
@@ -211,16 +384,16 @@ export function ScanView() {
                                     })
                                   }
                                 />
-                                {parameter.kind === "query"
-                                  ? `Query: ${parameter.name} (occurrence ${parameter.occurrence + 1})`
+                                {parameter.kind !== "json"
+                                  ? `${parameter.kind === "form" ? "Form" : "Query"}: ${parameter.name} (occurrence ${parameter.occurrence + 1})`
                                   : `JSON: ${parameter.pointer}`}
                               </label>
                             );
                           })
                         ) : (
                           <p className="text-xs text-muted-foreground">
-                            No supported query or JSON scalar parameters found. Header and XML-body
-                            checks can still run when their prerequisites are met.
+                            No supported query, form or JSON scalar parameters found. Header and
+                            XML-body checks can still run when their prerequisites are met.
                           </p>
                         )}
                       </div>
@@ -300,15 +473,21 @@ export function ScanView() {
                         checked={plan.allowSending}
                         onChange={(e) => update({ allowSending: e.target.checked })}
                       />
-                      I allow this scan to send requests for all selected checks to this endpoint,
-                      including repeated baseline and control requests.
+                      I allow this scan to send requests for all selected checks to{" "}
+                      {plan.crawlBeforeScan
+                        ? "the original and discovered endpoints"
+                        : "this endpoint"}
+                      , including repeated baseline and control requests.
                     </label>
                   </>
                 )}
               </fieldset>
               <div className="flex gap-2 flex-wrap">
                 <Button
-                  disabled={!plan.checks.length || (plan.mode !== "passive" && !plan.allowSending)}
+                  disabled={
+                    !plan.checks.length ||
+                    ((plan.mode !== "passive" || plan.crawlBeforeScan) && !plan.allowSending)
+                  }
                   onClick={() => {
                     try {
                       scan.start(plan);
@@ -320,7 +499,11 @@ export function ScanView() {
                     }
                   }}
                 >
-                  {plan.mode === "passive" ? "Inspect response" : "Start scan"}
+                  {plan.crawlBeforeScan
+                    ? "Crawl and scan"
+                    : plan.mode === "passive"
+                      ? "Inspect response"
+                      : "Start scan"}
                 </Button>
               </div>
             </section>
@@ -429,6 +612,18 @@ export function ScanView() {
                     {run.message}
                   </p>
                 )}
+                {run.crawl && (
+                  <details className="rounded border p-3 text-sm">
+                    <summary className="cursor-pointer">
+                      Crawl: {run.crawl.fetched} URLs fetched · {run.crawl.phase}
+                    </summary>
+                    <ul className="max-h-48 overflow-auto break-all py-2 font-mono text-xs">
+                      {run.crawl.urls.map((url) => (
+                        <li key={url}>{url}</li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
                 <label className="text-xs">
                   Finding status{" "}
                   <select
@@ -462,6 +657,11 @@ export function ScanView() {
                           {check.status}
                         </strong>{" "}
                         — {check.message}
+                        {check.endpoint && (
+                          <div className="break-all font-mono text-muted-foreground">
+                            {check.endpoint}
+                          </div>
+                        )}
                       </li>
                     ))}
                   </ul>

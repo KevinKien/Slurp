@@ -12,9 +12,21 @@ export interface ProtocolResponse {
   size: number;
 }
 export type CheckId =
+  | "parameter-hints"
+  | "hidden-parameters"
+  | "business-negative"
+  | "business-dates"
+  | "jwt-jwk"
+  | "jwt-jku"
+  | "jwt-x5u"
+  | "jwt-kid"
   | "403-bypass"
   | "dependency-audit"
   | "jwt-signature"
+  | "jwt-confusion"
+  | "jwt-weak-secret"
+  | "nosql-injection"
+  | "nosql-operators"
   | "graphql-introspection"
   | "graphql-batching"
   | "http-framing"
@@ -29,6 +41,7 @@ export type CheckId =
   | "reflection"
   | "input-errors"
   | "cors"
+  | "cors-trust"
   | "noauthen"
   | "js-endpoints"
   | "js-secrets"
@@ -43,6 +56,7 @@ export type CheckId =
   | "sql-boolean"
   | "sql-time"
   | "header-injection"
+  | "host-header"
   | "auth-access"
   | "referer-access"
   | "client-ip"
@@ -60,8 +74,21 @@ export type CheckId =
   | "xml-entity-body"
   | "xxe-body";
 export type ScanParameter =
-  { kind: "query"; name: string; occurrence: number } | { kind: "json"; pointer: string };
+  | { kind: "query"; name: string; occurrence: number }
+  | { kind: "form"; name: string; occurrence: number }
+  | { kind: "json"; pointer: string };
+export interface BusinessReadback {
+  url: string;
+  parameter: string;
+  /** Exact JSON pointer in the GET response; empty means the document root. */
+  pointer: string;
+}
 export interface ScanPlan {
+  crawlBeforeScan?: boolean;
+  crawlOptions?: import("./crawler").CrawlOptions;
+  businessReadback?: BusinessReadback | undefined;
+  /** RSA SPKI/PKCS#1 public PEM or X.509 certificate PEM for algorithm-confusion verification; never a private key. */
+  jwtPublicKey?: string;
   request: HttpRequest;
   mode: "passive" | "active" | "both";
   checks: CheckId[];
@@ -100,6 +127,9 @@ export interface ScanEvidence {
   bodyHash?: string;
 }
 export interface Finding {
+  endpoint?: string;
+  method?: string;
+  baselineId?: string;
   id: string;
   fingerprint: string;
   checkId: CheckId;
@@ -119,6 +149,7 @@ export interface Finding {
   remediation: string;
 }
 export interface CheckResult {
+  endpoint?: string;
   checkId: CheckId;
   parameter?: ScanParameter;
   status: "passed" | "findings" | "inconclusive" | "skipped";
@@ -126,6 +157,12 @@ export interface CheckResult {
   findingIds: string[];
 }
 export interface ScanRun {
+  crawl?: {
+    phase: "crawling" | "scanning" | "completed";
+    fetched: number;
+    queued: number;
+    urls: string[];
+  };
   domAudits?: import("./dom-audit").DomAudit[];
   version: 1;
   id: string;
@@ -154,6 +191,11 @@ export interface Exchange {
   response?: ScanResponse;
 }
 export interface ScanCheckContext {
+  probeHost?: (request: HttpRequest, header:"host"|"x-forwarded-host", host:string, label:string)=>Promise<Exchange>;
+  businessReadback?: BusinessReadback | undefined;
+  readBusiness?: (label: string) => Promise<Exchange>;
+  jwtPublicKey?: string;
+  loadJwtResource?: (url: string) => Promise<Exchange>;
   dependencies?: (
     name: string,
     version: string,
@@ -225,6 +267,7 @@ export interface OastProbe {
   events: OastEvent[];
 }
 export interface OastClient {
+  publishKey?: (material: { kind: "jwks" | "certificate"; body: string }) => Promise<OastProbe>;
   issue: () => Promise<OastProbe>;
   poll: (probe: OastProbe, exchange?: Exchange) => Promise<OastProbe>;
   wait: (ms: number) => Promise<void>;

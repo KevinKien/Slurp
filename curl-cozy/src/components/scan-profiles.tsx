@@ -7,6 +7,44 @@ import { Button } from "./ui/button";
 type Profile = { id: string; name: string; mode: "passive" | "active"; checks: CheckId[] };
 const storageKey = "slurp.scan-profiles.v1";
 const specialized: Profile[] = [
+  { id: "default-discovery-passive", name: "Parameter discovery (captured)", mode: "passive", checks: ["parameter-hints"] },
+  {
+    id: "default-discovery",
+    name: "Hidden input discovery",
+    mode: "active",
+    checks: ["hidden-parameters"],
+  },
+  {
+    id: "default-business",
+    name: "Business input validation",
+    mode: "active",
+    checks: ["business-negative", "business-dates"],
+  },
+  {
+    id: "default-jwt-keys",
+    name: "JWT key-source attacks",
+    mode: "active",
+    checks: ["jwt-jwk", "jwt-jku", "jwt-x5u", "jwt-kid"],
+  },
+  {
+    id: "default-jwt-confusion",
+    name: "JWT algorithm confusion",
+    mode: "active",
+    checks: ["jwt-signature", "jwt-confusion"],
+  },
+  { id: "default-cors", name: "CORS policy", mode: "active", checks: ["cors", "cors-trust"] },
+  {
+    id: "default-jwt-local",
+    name: "JWT weak signing secret (local)",
+    mode: "passive",
+    checks: ["jwt-weak-secret"],
+  },
+  {
+    id: "default-nosql",
+    name: "NoSQL parser audit",
+    mode: "active",
+    checks: ["nosql-injection", "nosql-operators"],
+  },
   {
     id: "default-dependencies",
     name: "JavaScript dependencies (OSV)",
@@ -20,6 +58,7 @@ const specialized: Profile[] = [
     mode: "active",
     checks: ["graphql-introspection", "graphql-batching"],
   },
+  {id:"default-host-header",name:"Host header injection",mode:"active",checks:["host-header"]},
   {
     id: "default-protocol",
     name: "HTTP protocol",

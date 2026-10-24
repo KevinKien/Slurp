@@ -10,6 +10,8 @@ mod scan_dependencies;
 mod oast;
 pub mod auto_audit;
 mod forbidden_audit;
+mod crlf_audit;
+mod host_audit;
 mod js_audit;
 pub mod security;
 pub mod proxy_settings;
@@ -59,9 +61,11 @@ pub async fn serve(listener: tokio::net::TcpListener, storage: Arc<TrafficStorag
     let app = Router::new()
         .route("/api/scan/browser", post(scan_browser::render))
         .route("/api/scan/protocol", post(scan_protocol::probe))
+        .route("/api/scan/host-header", post(host_audit::probe))
         .route("/api/scan/dependencies", post(scan_dependencies::lookup))
         .route("/api/scan/oast", get(oast::status))
         .route("/api/scan/oast/probes", post(oast::issue))
+        .route("/api/scan/oast/keys", post(oast::issue_key))
         .route("/api/scan/oast/probes/:id", get(oast::poll))
         .route("/api/scan/automatic", get(auto_audit::status).put(auto_audit::settings))
         .route("/api/ca.crt", get(certificate::download))

@@ -155,8 +155,118 @@ pub fn start(
         false,
         pending.clone(),
     ));
+    let storage_for_crlf = storage.clone();
+    let intercept_for_crlf = intercept.clone();
     let js = tokio::spawn(worker(storage, intercept, state.clone(), js_rx, true, pending));
-    (state, AuditRuntime(vec![capture, api, js]))
+    let mut tasks = vec![capture, api, js];
+    tasks.extend(start_header_audit(storage_for_crlf.clone(), intercept_for_crlf.clone(), state.clone(),false));
+    tasks.extend(start_header_audit(storage_for_crlf, intercept_for_crlf, state.clone(),true));
+    (state, AuditRuntime(tasks))
+}
+
+fn start_header_audit(
+    storage: Arc<TrafficStorage>,
+    intercept: Arc<Intercept>,
+    state: AuditState,
+    host: bool,
+) -> Vec<JoinHandle<()>> {
+    let check_id=if host {"host-header"}else{"header-injection"};
+    let (tx, mut rx) = mpsc::channel::<(String, String, String)>(128);
+    let pending: PendingApis = Arc::new(Mutex::new(HashSet::new()));
+    let mut events = storage.subscribe();
+    let source = storage.clone();
+    let status = state.clone();
+    let reservations = pending.clone();
+    let capture = tokio::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(TrafficEvent::NewEntry { entry } | TrafficEvent::EntryUpdated { entry }) => {
+                    if !status.enabled()
+                        || !eligible(&entry)
+                        || !(if host {super::host_audit::eligible(&entry)}else{super::crlf_audit::eligible(&entry)})
+                    {
+                        continue;
+                    }
+                    let Some(request) = request(&entry) else {
+                        continue;
+                    };
+                    let key = if host {super::host_audit::key(&request)}else{super::crlf_audit::key(&request)};
+                    if source
+                        .has_completed_automatic_check(
+                            &entry.workspace_id,
+                            &key,
+                            check_id,
+                        )
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    let reservation = (entry.workspace_id.clone(), key.clone());
+                    if !reservations.lock().unwrap().insert(reservation.clone()) {
+                        continue;
+                    }
+                    status.0.queued.fetch_add(1, Ordering::Relaxed);
+                    if tx.try_send((entry.id, entry.workspace_id, key)).is_err() {
+                        reservations.lock().unwrap().remove(&reservation);
+                        status.0.queued.fetch_sub(1, Ordering::Relaxed);
+                        status.0.skipped.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    status.0.skipped.fetch_add(n as usize, Ordering::Relaxed);
+                }
+                _ => {}
+            }
+        }
+    });
+    let worker = tokio::spawn(async move {
+        while let Some((id, workspace, key)) = rx.recv().await {
+            state.0.queued.fetch_sub(1, Ordering::Relaxed);
+            let _reservation = PendingApi(pending.clone(), Some((workspace, key.clone())));
+            let Some(entry) = storage.get(&id).ok().flatten() else {
+                continue;
+            };
+            if !state.enabled()
+                || !intercept.scope().matches(&entry.host)
+                || storage
+                    .has_completed_automatic_check(&entry.workspace_id, &key, check_id)
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+            let run_id = if storage
+                .get_scan_run(&entry.workspace_id, &key)
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                digest_id(if host {"auto-host-retry-"}else{"auto-crlf-retry-"}, format!("{key}:{id}").as_bytes())
+            } else {
+                key.clone()
+            };
+            state.0.active.fetch_add(1, Ordering::Relaxed);
+            let result = if host { super::host_audit::audit(&entry, &run_id, &state, &intercept).await }else{super::crlf_audit::audit(&entry, &run_id, &state, &intercept).await};
+            if let Some(run) = result {
+                if storage.get(&id).ok().flatten().is_some() {
+                    if super::scan::validate_run(&run_id, &run).is_ok()
+                        && storage
+                            .put_scan_run(&entry.workspace_id, &run_id, &run)
+                            .is_ok()
+                    {
+                        state.0.completed.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        state.0.errors.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!("Could not save automatic header audit {run_id}");
+                    }
+                }
+            } else {
+                state.0.skipped.fetch_add(1, Ordering::Relaxed);
+            }
+            state.0.active.fetch_sub(1, Ordering::Relaxed);
+        }
+    });
+    vec![capture, worker]
 }
 
 fn eligible(entry: &TrafficEntry) -> bool {

@@ -4,9 +4,11 @@ import { ScanEngine, newScanPlan, type ScanPlan, type ScanRun } from "@/lib/scan
 import {
   saveScanRun,
   probeHttpProtocol,
+  probeHostHeader,
   lookupDependency,
   validateBrowserSnapshot,
   issueOastProbe,
+  publishJwtKey,
   pollOastProbe,
 } from "@/lib/scan-api";
 import { useInspector } from "./inspector";
@@ -20,6 +22,8 @@ export function ScanProvider({ children }: { children: ReactNode }) {
     auth = useAuthProfiles()!;
   const workspace = session?.target === "workspace" ? session.workspace_id : null,
     key = workspace ?? "@temporary";
+  const crawlScope = useRef({ scope, scopeEnabled });
+  crawlScope.current = { scope, scopeEnabled };
   const send = sendHttpRequest;
   const runners = useRef(new Map<string, { workspace: string | null; engine: ScanEngine }>());
   const [configuringKey, setConfiguringKey] = useState<string | null>(null);
@@ -126,7 +130,8 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       plan.mode !== "passive" || !plan.observed ? auth.createSession(profileId, variables) : null;
     const prepared = {
       ...structuredClone(plan),
-      allowSending: plan.allowSending || (plan.mode === "passive" && !plan.observed),
+      allowSending:
+        plan.allowSending || (!plan.crawlBeforeScan && plan.mode === "passive" && !plan.observed),
       request: identity
         ? identity.resolve(plan.request, identity.variables)
         : structuredClone(plan.request),
@@ -134,10 +139,26 @@ export function ScanProvider({ children }: { children: ReactNode }) {
     const engine = new ScanEngine(
       prepared,
       {
+        allowCrawlUrl: (url) => {
+          const current = crawlScope.current;
+          return (
+            !current.scopeEnabled ||
+            !(current.scope ?? "").trim() ||
+            current.scope
+              .split("\n")
+              .map((s) => s.trim().toLowerCase().replace(/\.$/, ""))
+              .includes(new URL(url).hostname.toLowerCase().replace(/\.$/, ""))
+          );
+        },
         browser: validateBrowserSnapshot,
         protocol: probeHttpProtocol,
+        hostHeader: probeHostHeader,
         dependencies: lookupDependency,
-        oast: { issue: issueOastProbe, poll: (probe) => pollOastProbe(probe.id) },
+        oast: {
+          publishKey: publishJwtKey,
+          issue: issueOastProbe,
+          poll: (probe) => pollOastProbe(probe.id),
+        },
         allowScriptOrigin: (url) =>
           !!scopeEnabled &&
           (scope ?? "")
