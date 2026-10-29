@@ -65,3 +65,6 @@ Desktop.ini
 
 # Local management credential
 api-token
+
+# Local codebase analysis notes
+/CODEBASE_ANALYSIS.md

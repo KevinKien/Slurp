@@ -32,6 +32,10 @@ vi.mock('@/lib/bruno-import-client',async()=>{
  const parser=await import('@/lib/bruno-import');
  return {readBrunoFiles:vi.fn(async(kind:string,files:{name:string;source:string}[])=>kind==='environment'?parser.parseBrunoEnvironment(files[0]!):parser.parseBrunoFiles(files))};
 });
+vi.mock('@/lib/burp-import-client',async()=>{
+ const parser=await import('@/lib/burp-import');
+ return {readBurpExport:vi.fn(async(name:string,source:string)=>parser.parseBurpExport(source,name))};
+});
 const send = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/api", () => api);
 vi.mock("@/lib/ws", () => ({ useTrafficStream: () => ({ status: "connected" }) }));
@@ -544,5 +548,48 @@ describe('Bruno request import into Replay',()=>{
   fireEvent.change(screen.getByLabelText('Bruno request files'),{target:{files:[file('good.bru',bru('Valid request')),file('bad.bru','invalid data')]}});
   await screen.findByLabelText('Import Valid request');expect(screen.getByLabelText('Import bad')).toBeDisabled();
   fireEvent.click(screen.getByRole('button',{name:'Import 1 request'}));expect(await screen.findByRole('button',{name:'Valid request'})).toBeTruthy();expect(send).not.toHaveBeenCalled();
+ });
+});
+
+
+describe('Burp export import into Replay',()=>{
+ const encode=(value:string)=>{let binary='';for(const byte of new TextEncoder().encode(value))binary+=String.fromCharCode(byte);return btoa(binary);};
+ const burp=(request:string,comment:string)=>`<?xml version="1.0"?>
+<!DOCTYPE items [<!ELEMENT items (item*)>]>
+<items burpVersion="2026.7.1"><item>
+<url><![CDATA[https://example.com/login]]></url>
+<host ip="93.184.216.34">example.com</host>
+<port>443</port>
+<protocol>https</protocol>
+<method><![CDATA[POST]]></method>
+<path><![CDATA[/login]]></path>
+<extension>null</extension>
+<request base64="true"><![CDATA[${encode(request)}]]></request>
+<status>200</status>
+<responselength>18</responselength>
+<mimetype>JSON</mimetype>
+<response base64="true"><![CDATA[${encode('HTTP/1.1 200 OK\r\n\r\n')}]]></response>
+<comment><![CDATA[${comment}]]></comment>
+</item></items>`;
+ const file=(name:string,source:string)=>{const value=new File([source],name,{type:'application/xml'});Object.defineProperty(value,'text',{value:async()=>source});return value;};
+ it('imports a saved Burp item as a named tab without sending',async()=>{
+  docs['w1']={...stored(5,'Saved tab','https://saved.example/one'),variables:{token:'keep'}};
+  renderReplay();await screen.findByRole('button',{name:'Saved tab'});
+  fireEvent.click(screen.getByRole('button',{name:'Import Burp'}));
+  fireEvent.change(screen.getByLabelText('Burp export file'),{target:{files:[file('history.xml',burp('POST /login HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\nContent-Length: 17\r\n\r\n{"name":"alice"}','Login request'))]}});
+  await screen.findByLabelText('Import Login request');
+  fireEvent.click(screen.getByRole('button',{name:'Import 1 request'}));
+  expect(await screen.findByRole('button',{name:'Login request'})).toBeTruthy();
+  expect(urlField()).toHaveValue('https://example.com/login');
+  expect(send).not.toHaveBeenCalled();
+  await waitFor(()=>expect(api.saveReplayTabs).toHaveBeenCalledWith('w1',expect.objectContaining({variables:{token:'keep'},tabs:expect.arrayContaining([expect.objectContaining({name:'Login request',customName:true,request:expect.objectContaining({method:'POST',body:'{"name":"alice"}'})})])}),expect.anything()));
+ });
+ it('explains a binary .burp project instead of importing it',async()=>{
+  renderReplay();await screen.findByRole('button',{name:'Saved tab'});
+  fireEvent.click(screen.getByRole('button',{name:'Import Burp'}));
+  fireEvent.change(screen.getByLabelText('Burp export file'),{target:{files:[file('project.burp','\u0000\u0001burp\u0007'+'\u0000'.repeat(200))]}});
+  expect(await screen.findByText(/proprietary binary format/)).toBeTruthy();
+  expect(screen.getByRole('button',{name:'Import 0 requests'})).toBeDisabled();
+  expect(send).not.toHaveBeenCalled();
  });
 });

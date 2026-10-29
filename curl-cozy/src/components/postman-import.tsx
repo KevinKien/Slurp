@@ -12,7 +12,88 @@ import {
   type PostmanRequest,
 } from "@/lib/postman-import";
 import { readBrunoFiles } from "@/lib/bruno-import-client";
+import { MAX_BURP_BYTES } from "@/lib/burp-import";
+import { readBurpExport } from "@/lib/burp-import-client";
 import type { ReplayVariables } from "@/lib/replay-features";
+
+export type ImportFormat = "postman" | "bruno" | "burp";
+
+interface FormatConfig {
+  sourceName: string;
+  title: string;
+  description: string;
+  accept: string;
+  inputLabel: string;
+  fileLabel: string;
+  variableLabel: string;
+  environmentLabel: string;
+  environmentInputLabel: string;
+  environmentAccept: string;
+  maxTotalBytes: number;
+  /** Per-file ceiling, used by formats that accept several files. */
+  perFileBytes?: number;
+  maxFiles: number;
+  multiple: boolean;
+  supportsEnvironment: boolean;
+  note?: string;
+}
+
+const FORMATS: Record<ImportFormat, FormatConfig> = {
+  postman: {
+    sourceName: "Postman",
+    title: "Import Postman Collection",
+    description:
+      "Select requests from a Collection v2.0 or v2.1 JSON file. Each selected request becomes a Replay tab. No requests or scripts are executed.",
+    accept: ".json,application/json",
+    inputLabel: "Postman collection file",
+    fileLabel: "Collection JSON (up to 10 MB)",
+    variableLabel: "Import collection and environment variables",
+    environmentLabel:
+      "Environment JSON (optional, up to 10 MB; environment values take precedence over collection values)",
+    environmentInputLabel: "Postman environment file",
+    environmentAccept: ".json,application/json",
+    maxTotalBytes: MAX_POSTMAN_BYTES,
+    maxFiles: 1,
+    multiple: false,
+    supportsEnvironment: true,
+  },
+  bruno: {
+    sourceName: "Bruno",
+    title: "Import Bruno requests",
+    description:
+      "Select one or more Bruno .bru request files. Each selected request becomes a Replay tab. No requests or scripts are executed.",
+    accept: ".bru",
+    inputLabel: "Bruno request files",
+    fileLabel: "Request .bru files (2 MB each, 10 MB total)",
+    variableLabel: "Import environment variables",
+    environmentLabel: "Environment .bru (optional, up to 2 MB)",
+    environmentInputLabel: "Bruno environment file",
+    environmentAccept: ".bru",
+    maxTotalBytes: MAX_POSTMAN_BYTES,
+    perFileBytes: 2_000_000,
+    maxFiles: 500,
+    multiple: true,
+    supportsEnvironment: true,
+  },
+  burp: {
+    sourceName: "Burp",
+    title: "Import Burp export",
+    description:
+      "Select a Burp XML export of saved items (right-click → Save items, with base64 encoding enabled) or a prub JSON project export. Each selected request becomes a Replay tab; responses and scripts are not imported.",
+    accept: ".xml,.burp,.json,application/xml,text/xml,application/json",
+    inputLabel: "Burp export file",
+    fileLabel: "Burp XML export or prub JSON (up to 10 MB)",
+    variableLabel: "",
+    environmentLabel: "",
+    environmentInputLabel: "",
+    environmentAccept: "",
+    maxTotalBytes: MAX_BURP_BYTES,
+    maxFiles: 1,
+    multiple: false,
+    supportsEnvironment: false,
+    note: "A .burp project file is a proprietary binary format. Export the items as XML from Burp, or convert the project with the community prub tool and import its JSON.",
+  },
+};
 
 export function PostmanImportDialog({
   variables,
@@ -20,13 +101,12 @@ export function PostmanImportDialog({
   onImport,
   format = "postman",
 }: {
-  format?: "postman" | "bruno";
+  format?: ImportFormat;
   variables: ReplayVariables;
   slots: number;
   onImport: (requests: PostmanRequest[], variables: ReplayVariables) => void;
 }) {
-  const bruno = format === "bruno";
-  const sourceName = bruno ? "Bruno" : "Postman";
+  const config = FORMATS[format];
   const [open, setOpen] = useState(false),
     [collection, setCollection] = useState<PostmanImport | null>(null),
     [environment, setEnvironment] = useState<ReturnType<typeof parsePostmanEnvironment> | null>(
@@ -63,33 +143,47 @@ export function PostmanImportDialog({
       setSelected(new Set());
     } else setEnvironment(null);
     try {
-      if (files.reduce((sum, file) => sum + file.size, 0) > MAX_POSTMAN_BYTES)
-        throw Error("Selected files exceed the 10 MB total limit.");
-      if (files.length > 500) throw Error("Select at most 500 request files.");
-      if (bruno && files.some((file) => file.size > 2_000_000))
-        throw Error("Bruno files must be 2 MB or smaller.");
+      if (files.reduce((sum, file) => sum + file.size, 0) > config.maxTotalBytes)
+        throw Error(
+          format === "burp"
+            ? "File exceeds the 10 MB limit."
+            : "Selected files exceed the 10 MB total limit.",
+        );
+      if (files.length > config.maxFiles)
+        throw Error(`Select at most ${config.maxFiles.toLocaleString("en-US")} request files.`);
+      const perFileBytes = config.perFileBytes;
+      if (perFileBytes && files.some((file) => file.size > perFileBytes))
+        throw Error(
+          `${config.sourceName} files must be ${Math.round(perFileBytes / 1_000_000)} MB or smaller.`,
+        );
       const sources = await Promise.all(
         files.map(async (file) => ({ name: file.name, source: await file.text() })),
       );
       if (version !== generation.current) return;
+      const first = sources[0];
+      if (!first) throw Error("Could not read the selected file.");
       if (kind === "collection") {
-        const result = bruno
-          ? await readBrunoFiles("collection", sources)
-          : parsePostmanCollection(sources[0]!.source);
+        const result =
+          format === "bruno"
+            ? await readBrunoFiles("collection", sources)
+            : format === "burp"
+              ? await readBurpExport(first.name, first.source)
+              : parsePostmanCollection(first.source);
         if (version !== generation.current) return;
         setCollection(result);
         setSelected(
           new Set(
             result.requests
-              .filter((r) => r.request)
+              .filter((request) => request.request)
               .slice(0, Math.max(0, slots))
-              .map((r) => r.id),
+              .map((request) => request.id),
           ),
         );
       } else {
-        const result = bruno
-          ? await readBrunoFiles("environment", sources)
-          : parsePostmanEnvironment(sources[0]!.source);
+        const result =
+          format === "bruno"
+            ? await readBrunoFiles("environment", sources)
+            : parsePostmanEnvironment(first.source);
         if (version === generation.current) setEnvironment(result);
       }
     } catch (e) {
@@ -107,7 +201,8 @@ export function PostmanImportDialog({
   } catch (e) {
     mergeError = (e as Error).message;
   }
-  const chosen = collection?.requests.filter((r) => selected.has(r.id) && r.request) ?? [];
+  const chosen =
+    collection?.requests.filter((request) => selected.has(request.id) && request.request) ?? [];
   const missing = missingPostmanVariables(chosen, merged);
   const conflicts = Object.keys(incoming).filter((key) => Object.hasOwn(variables, key));
   const importSelected = () => {
@@ -125,34 +220,22 @@ export function PostmanImportDialog({
     <>
       <Button variant="outline" size="sm" onClick={() => changeOpen(true)}>
         <FileJson />
-        Import {sourceName}
+        Import {config.sourceName}
       </Button>
       <Dialog open={open} onOpenChange={changeOpen}>
         <DialogContent className="flex max-h-[85vh] max-w-3xl flex-col bg-card">
           <DialogHeader>
-            <DialogTitle>
-              Import {sourceName}
-              {bruno ? " requests" : " Collection"}
-            </DialogTitle>
-            <DialogDescription>
-              {bruno
-                ? "Select one or more Bruno .bru request files."
-                : "Select requests from a Collection v2.0 or v2.1 JSON file."}{" "}
-              Each selected request becomes a Replay tab. No requests or scripts are executed.
-            </DialogDescription>
+            <DialogTitle>{config.title}</DialogTitle>
+            <DialogDescription>{config.description}</DialogDescription>
           </DialogHeader>
           <div className="min-h-0 overflow-auto space-y-4 pr-1">
             <label className="block space-y-2 text-xs">
-              <span>
-                {bruno
-                  ? "Request .bru files (2 MB each, 10 MB total)"
-                  : "Collection JSON (up to 10 MB)"}
-              </span>
+              <span>{config.fileLabel}</span>
               <input
-                aria-label={bruno ? "Bruno request files" : "Postman collection file"}
+                aria-label={config.inputLabel}
                 type="file"
-                multiple={bruno}
-                accept={bruno ? ".bru" : ".json,application/json"}
+                multiple={config.multiple}
+                accept={config.accept}
                 className="block w-full text-xs"
                 disabled={busy}
                 onChange={(e) => {
@@ -162,6 +245,7 @@ export function PostmanImportDialog({
                 }}
               />
             </label>
+            {config.note && <p className="text-xs text-muted-foreground">{config.note}</p>}
             {busy && (
               <p role="status" className="text-xs text-muted-foreground">
                 Reading file…
@@ -183,36 +267,34 @@ export function PostmanImportDialog({
                     Replay supports up to 100 tabs. Unsupported requests are disabled; review their
                     warnings below.
                   </p>
-                  <label className="flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      checked={includeVariables}
-                      onChange={(e) => setIncludeVariables(e.target.checked)}
-                    />
-                    {bruno
-                      ? "Import environment variables"
-                      : "Import collection and environment variables"}
-                  </label>
-                  <label className="block space-y-2">
-                    <span>
-                      {bruno
-                        ? "Environment .bru (optional, up to 2 MB)"
-                        : "Environment JSON (optional, up to 10 MB; environment values take precedence over collection values)"}
-                    </span>
-                    <input
-                      aria-label={bruno ? "Bruno environment file" : "Postman environment file"}
-                      type="file"
-                      accept={bruno ? ".bru" : ".json,application/json"}
-                      className="block w-full text-xs"
-                      disabled={busy}
-                      onChange={(e) => {
-                        const files = Array.from(e.target.files ?? []);
-                        e.target.value = "";
-                        void readFiles(files, "environment");
-                      }}
-                    />
-                  </label>
-                  {(environment || fileError) && (
+                  {config.supportsEnvironment && (
+                    <label className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={includeVariables}
+                        onChange={(e) => setIncludeVariables(e.target.checked)}
+                      />
+                      {config.variableLabel}
+                    </label>
+                  )}
+                  {config.supportsEnvironment && (
+                    <label className="block space-y-2">
+                      <span>{config.environmentLabel}</span>
+                      <input
+                        aria-label={config.environmentInputLabel}
+                        type="file"
+                        accept={config.environmentAccept}
+                        className="block w-full text-xs"
+                        disabled={busy}
+                        onChange={(e) => {
+                          const files = Array.from(e.target.files ?? []);
+                          e.target.value = "";
+                          void readFiles(files, "environment");
+                        }}
+                      />
+                    </label>
+                  )}
+                  {config.supportsEnvironment && (environment || fileError) && (
                     <Button
                       variant="ghost"
                       size="sm"
@@ -230,13 +312,13 @@ export function PostmanImportDialog({
                       Environment loaded · {Object.keys(environment.variables).length} variables
                     </p>
                   )}
-                  {includeVariables && (
+                  {config.supportsEnvironment && includeVariables && (
                     <p>
                       {Object.keys(incoming).length} incoming variables · {conflicts.length}{" "}
                       existing names. Existing workspace values are kept by default.
                     </p>
                   )}
-                  {includeVariables && conflicts.length > 0 && (
+                  {config.supportsEnvironment && includeVariables && conflicts.length > 0 && (
                     <>
                       <p className="break-words text-muted-foreground">
                         Conflicts: {conflicts.join(", ")}
@@ -272,9 +354,9 @@ export function PostmanImportDialog({
                       setSelected(
                         new Set(
                           collection.requests
-                            .filter((r) => r.request)
+                            .filter((request) => request.request)
                             .slice(0, Math.max(0, slots))
-                            .map((r) => r.id),
+                            .map((request) => request.id),
                         ),
                       )
                     }
@@ -325,7 +407,7 @@ export function PostmanImportDialog({
                       {item.scripts.length > 0 && (
                         <details>
                           <summary className="cursor-pointer text-muted-foreground">
-                            Original {sourceName} scripts (preview, not imported)
+                            Original {config.sourceName} scripts (preview, not imported)
                           </summary>
                           <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-secondary p-2 font-mono">
                             {item.scripts.join("\n\n")}

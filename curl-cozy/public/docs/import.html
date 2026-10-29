@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Importing Requests Documentation — Slurp</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/docs/theme.css">
+</head>
+<body>
+  <nav aria-label="Documentation"><a href="/docs">← All documentation</a></nav><h1>Importing requests into Replay</h1>
+  <p>Requests can be imported from cURL, Postman collections, Bruno files and Burp exports. Open <strong>Replay</strong> and use the toolbar buttons: <strong>Import Postman</strong>, <strong>Import Bruno</strong>, <strong>Import Burp</strong> or <strong>Import cURL</strong>. Each selected request becomes its own Replay tab.</p>
+  <p>Parsing happens in your browser. Files are never uploaded, and no imported request or script is executed until you click <strong>Send</strong>.</p>
+  <h2>cURL</h2>
+  <p>Paste a cURL command and choose <strong>Import request</strong>. The command is parsed as text; it is never executed by a shell. The result replaces the request in the active tab.</p>
+  <h2>Postman</h2>
+  <ul>
+    <li>Accepts Collection v2.0 or v2.1 JSON, up to 10 MB and 500 requests.</li>
+    <li>Folders become tab names such as <code>Auth / Login</code>. An optional environment JSON can be imported at the same time; environment values take precedence over collection values.</li>
+    <li>Existing workspace variables are kept unless you enable <strong>Overwrite existing workspace variables</strong>.</li>
+    <li>Postman scripts and protocol options are shown for reference only. They are not converted or executed. Basic and bearer authentication are converted to an <code>Authorization</code> header.</li>
+  </ul>
+  <h2>Bruno</h2>
+  <ul>
+    <li>Select one or more <code>.bru</code> request files (2 MB each, 10 MB total, 500 files) and an optional environment <code>.bru</code> file.</li>
+    <li>Only raw JSON, text, XML and SPARQL bodies are supported. Collection and folder inheritance is not available in standalone files, so set explicit authentication and body modes before exporting.</li>
+    <li>Request-scoped variables, assertions, scripts and response extractors are not imported; convert them to Replay variables or an After response script manually.</li>
+  </ul>
+  <h2>Burp</h2>
+  <p><img src="/docs/burp-import-dialog.png" alt="Import Burp export dialog showing the file picker and the note about .burp project files" style="max-width:100%;height:auto;border:1px solid #3b414c;border-radius:8px"></p>
+  <p>In Burp, select the Proxy history, Repeater or Site map items you need, right-click and choose <strong>Save items</strong>, then keep <strong>Base64-encode requests and responses</strong> enabled. Import the saved XML with <strong>Import Burp</strong>.</p>
+  <ul>
+    <li>The item comment becomes the tab name. Items without a comment are named <code>METHOD /path</code>, and duplicate names get a numeric suffix.</li>
+    <li>The <code>Host</code> header, item host, port and protocol are combined into the request URL. Absolute-form request targets are kept as sent.</li>
+    <li>Connection framing headers are removed because the URL and body define what Replay sends: <code>Host</code>, <code>Content-Length</code>, <code>Transfer-Encoding</code>, <code>Connection</code>, <code>Proxy-Connection</code>, <code>Keep-Alive</code>, <code>Upgrade</code>, <code>TE</code>, <code>Trailer</code> and <code>Expect</code>. The import lists them in a warning.</li>
+    <li>Repeated header names keep the first value and report the duplicates. Requests with invalid header names or values are disabled with a warning.</li>
+    <li><code>CONNECT</code> tunnels, unsupported methods and non-HTTP request targets are disabled with a warning. Only the request side is imported; captured responses are ignored.</li>
+    <li>Request bodies must be text and at most 1 MB. Non-text bodies are imported with a warning, while gzip-compressed bodies are disabled because they cannot be represented as text.</li>
+    <li>Up to 10 MB, 5,000 items and 500 requests per export. Items with only a response are skipped; if nothing importable remains, the import reports why.</li>
+  </ul>
+  <h3>Burp project files (<code>.burp</code>)</h3>
+  <p>A <code>.burp</code> project file is a proprietary binary format that PortSwigger does not publish, so it cannot be read directly. Slurp detects it and explains the options instead of guessing:</p>
+  <ul>
+    <li>Export the items you need as XML from Burp and import that file, or</li>
+    <li>Convert the whole project with the community <code>prub</code> tool (<code>prub export project.burp export.json</code>) and import the resulting JSON. Slurp reads its <code>proxy</code>, <code>repeater</code> and <code>target</code> entries, and Repeater captions become tab names.</li>
+  </ul>
+  <p>Project request bytes do not record the URL scheme, so those URLs default to <code>http</code>. Change them to <code>https</code> in the URL field when the traffic used TLS.</p>
+  <h2>Variables and limits</h2>
+  <ul>
+    <li>Imported requests keep <code>{{variable}}</code> syntax where the source format used it. Missing variables are listed before import; add them under <strong>Variables</strong> before sending.</li>
+    <li>Replay holds up to 100 tabs per workspace, so the number of selectable requests is capped by the free slots. Close tabs to import more.</li>
+    <li>Each import is stored in the selected workspace with the other tabs. Temporary sessions keep imported tabs in memory only.</li>
+    <li>Replay sends requests through the Rust backend with the same HTTP(S) validation, DNS pinning, redirect policy, response size limit and timeout as any other send.</li>
+  </ul>
+</body>
+</html>

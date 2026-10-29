@@ -160,8 +160,128 @@ pub fn start(
     let js = tokio::spawn(worker(storage, intercept, state.clone(), js_rx, true, pending));
     let mut tasks = vec![capture, api, js];
     tasks.extend(start_header_audit(storage_for_crlf.clone(), intercept_for_crlf.clone(), state.clone(),false));
-    tasks.extend(start_header_audit(storage_for_crlf, intercept_for_crlf, state.clone(),true));
+    tasks.extend(start_header_audit(storage_for_crlf.clone(), intercept_for_crlf.clone(), state.clone(),true));
+    tasks.extend(start_cve_audit(storage_for_crlf.clone(), intercept_for_crlf.clone(), state.clone(), "php2shell"));
+    tasks.extend(start_cve_audit(storage_for_crlf.clone(), intercept_for_crlf.clone(), state.clone(), "http2shell"));
+    tasks.extend(start_cve_audit(storage_for_crlf, intercept_for_crlf, state.clone(), "react2shell"));
     (state, AuditRuntime(tasks))
+}
+
+fn cve_eligible(check: &str, entry: &TrafficEntry) -> bool {
+    match check {
+        "php2shell" => super::php2shell::eligible(entry),
+        "http2shell" => super::http2shell::eligible(entry),
+        "react2shell" => super::react2shell::eligible(entry),
+        _ => false,
+    }
+}
+
+fn cve_key(check: &str, request: &Value) -> String {
+    match check {
+        "php2shell" => super::php2shell::key(request),
+        "http2shell" => super::http2shell::key(request),
+        _ => super::react2shell::key(request),
+    }
+}
+
+/// CVE exposure audits keep their own queue and dedup key so one check cannot delay another.
+/// `php2shell` is passive, `http2shell` sends one bounded differential probe and `react2shell`
+/// sends one ordinary RSC navigation; none sends an exploit payload.
+fn start_cve_audit(
+    storage: Arc<TrafficStorage>,
+    intercept: Arc<Intercept>,
+    state: AuditState,
+    check: &'static str,
+) -> Vec<JoinHandle<()>> {
+    let (tx, mut rx) = mpsc::channel::<(String, String, String)>(64);
+    let pending: PendingApis = Arc::new(Mutex::new(HashSet::new()));
+    let mut events = storage.subscribe();
+    let source = storage.clone();
+    let status = state.clone();
+    let reservations = pending.clone();
+    let capture = tokio::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(TrafficEvent::NewEntry { entry } | TrafficEvent::EntryUpdated { entry }) => {
+                    let wanted = cve_eligible(check, &entry);
+                    if !status.enabled() || !eligible(&entry) || !wanted {
+                        continue;
+                    }
+                    let Some(request) = request(&entry) else { continue; };
+                    let key = cve_key(check, &request);
+                    // One attempt per deployment: a saved run in any state is final until deleted.
+                    if source
+                        .get_scan_run(&entry.workspace_id, &key)
+                        .ok()
+                        .flatten()
+                        .is_some()
+                    {
+                        continue;
+                    }
+                    let reservation = (entry.workspace_id.clone(), key.clone());
+                    if !reservations.lock().unwrap().insert(reservation.clone()) {
+                        continue;
+                    }
+                    status.0.queued.fetch_add(1, Ordering::Relaxed);
+                    if tx.try_send((entry.id, entry.workspace_id, key)).is_err() {
+                        reservations.lock().unwrap().remove(&reservation);
+                        status.0.queued.fetch_sub(1, Ordering::Relaxed);
+                        status.0.skipped.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                    status.0.skipped.fetch_add(count as usize, Ordering::Relaxed);
+                }
+                _ => {}
+            }
+        }
+    });
+    let worker = tokio::spawn(async move {
+        while let Some((id, workspace, key)) = rx.recv().await {
+            state.0.queued.fetch_sub(1, Ordering::Relaxed);
+            let _reservation = PendingApi(pending.clone(), Some((workspace, key.clone())));
+            let Some(entry) = storage.get(&id).ok().flatten() else {
+                continue;
+            };
+            if !state.enabled() || !intercept.scope().matches(&entry.host) {
+                continue;
+            }
+            if storage
+                .get_scan_run(&entry.workspace_id, &key)
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                continue;
+            }
+            let run_id = key.clone();
+            state.0.active.fetch_add(1, Ordering::Relaxed);
+            let result = match check {
+                "php2shell" => super::php2shell::audit(&entry, &run_id, &state, &intercept).await,
+                "http2shell" => super::http2shell::audit(&entry, &run_id, &state, &intercept).await,
+                _ => super::react2shell::audit(&entry, &run_id, &state, &intercept).await,
+            };
+            if let Some(run) = result {
+                if storage.get(&id).ok().flatten().is_some() {
+                    if super::scan::validate_run(&run_id, &run).is_ok()
+                        && storage
+                            .put_scan_run(&entry.workspace_id, &run_id, &run)
+                            .is_ok()
+                    {
+                        state.0.completed.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        state.0.errors.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!("Could not save automatic {check} audit {run_id}");
+                    }
+                }
+            } else {
+                state.0.skipped.fetch_add(1, Ordering::Relaxed);
+            }
+            state.0.active.fetch_sub(1, Ordering::Relaxed);
+        }
+    });
+    vec![capture, worker]
 }
 
 fn start_header_audit(
