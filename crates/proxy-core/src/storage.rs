@@ -519,7 +519,7 @@ impl TrafficStorage {
         self.tx.subscribe()
     }
 
-    fn lock_db(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+    pub(crate) fn lock_db(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.db.lock().map_err(|e| anyhow::anyhow!("DB lock: {}", e))
     }
 
@@ -834,11 +834,11 @@ impl TrafficStorage {
 
     // ── Workspaces ───────────────────────────────────────────────
 
-    fn notify_workspaces_changed(&self) {
+    pub(crate) fn notify_workspaces_changed(&self) {
         let _ = self.tx.send(TrafficEvent::WorkspacesChanged);
     }
 
-    fn clean_name(name: &str) -> Result<String, WorkspaceError> {
+    pub(crate) fn clean_name(name: &str) -> Result<String, WorkspaceError> {
         let name = name.trim();
         if name.is_empty() || name.chars().count() > 60 || name.chars().any(char::is_control) {
             return Err(WorkspaceError::InvalidName);
@@ -1644,4 +1644,166 @@ impl TrafficStorage {
   let mut query=db.prepare(&format!("SELECT json_object('runId',r.id,'startedAt',r.started_at,'url',COALESCE(json_extract(f.value,'$.endpoint'),json_extract(r.data,'$.plan.request.url')),'method',COALESCE(json_extract(f.value,'$.method'),json_extract(r.data,'$.plan.request.method')),'finding',json(f.value)) FROM scan_runs r,json_each(r.data,'$.findings') f WHERE {filter} ORDER BY r.started_at DESC,r.id DESC,CAST(f.key AS INTEGER) ASC LIMIT 100 OFFSET ?5"))?;
   let rows=query.query_map(params![workspace,search,status,severity,offset],|r|r.get::<_,String>(0))?;let data=rows.map(|r|Ok(serde_json::from_str(&r?)?)).collect::<Result<Vec<_>>>()?;Ok((total,data))
  }
+}
+
+impl TrafficStorage {
+    /// Endpoint candidates extracted from captured JavaScript, deduplicated by method and URL.
+    /// Returns the unique total and a bounded page so callers can report truncation.
+    pub fn js_endpoints(&self, workspace: &str) -> Result<(usize, Vec<serde_json::Value>), WorkspaceError> {
+        const MAX_RUNS: usize = 200;
+        const MAX_ENDPOINTS: usize = 200;
+        let db = self.lock_for(Some(workspace)).map_err(WorkspaceError::Other)?;
+        let mut query = db.prepare("SELECT data FROM scan_runs WHERE workspace_id=?1 AND EXISTS (SELECT 1 FROM json_each(scan_runs.data,'$.plan.checks') WHERE value='js-endpoints') ORDER BY started_at DESC,id DESC LIMIT ?2")?;
+        let rows = query.query_map(params![workspace, MAX_RUNS as i64], |r| r.get::<_, String>(0))?;
+        let mut seen = std::collections::HashSet::new();
+        let mut endpoints: Vec<serde_json::Value> = vec![];
+        let mut total = 0usize;
+        for row in rows {
+            let raw = row?;
+            let Ok(run) = serde_json::from_str::<serde_json::Value>(&raw) else { continue; };
+            let Some(findings) = run["findings"].as_array() else { continue; };
+            for finding in findings {
+                if finding["checkId"] != "js-endpoints" { continue; }
+                let mut method = "GET".to_string();
+                let mut endpoint: Option<String> = None;
+                let mut source = String::new();
+                for excerpt in finding["excerpts"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                {
+                    if let Some(value) = excerpt.strip_prefix("Method:") {
+                        method = value.trim().to_ascii_uppercase();
+                    } else if let Some(value) = excerpt.strip_prefix("Endpoint candidate:") {
+                        endpoint = Some(value.trim().to_string());
+                    } else if let Some(value) = excerpt.strip_prefix("Source:") {
+                        source = value.trim().to_string();
+                    }
+                }
+                let Some(endpoint) = endpoint else { continue; };
+                let Ok(mut url) = url::Url::parse(&endpoint) else { continue; };
+                if !["http", "https"].contains(&url.scheme()) || url.host_str().is_none() { continue; }
+                let _ = url.set_username("");
+                let _ = url.set_password(None);
+                url.set_fragment(None);
+                if !["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].contains(&method.as_str()) {
+                    method = "GET".into();
+                }
+                if !seen.insert(format!("{method} {}", url.as_str())) { continue; }
+                total += 1;
+                if endpoints.len() >= MAX_ENDPOINTS { continue; }
+                endpoints.push(serde_json::json!({
+                    "method": method,
+                    "url": url.as_str(),
+                    "source": source,
+                }));
+            }
+        }
+        Ok((total, endpoints))
+    }
+}
+
+#[cfg(test)]
+mod js_endpoint_tests {
+    use super::*;
+
+    fn run(id: &str, started: &str, endpoints: &[(&str, &str)]) -> serde_json::Value {
+        let findings: Vec<serde_json::Value> = endpoints
+            .iter()
+            .enumerate()
+            .map(|(index, (method, url))| {
+                serde_json::json!({
+                    "id": format!("f{index}"),
+                    "fingerprint": format!("js-endpoints:{index}"),
+                    "checkId": "js-endpoints",
+                    "title": "JavaScript: API / endpoint discovered",
+                    "summary": "literal",
+                    "severity": "info",
+                    "confidence": "medium",
+                    "status": "needs_review",
+                    "evidenceIds": ["observed"],
+                    "excerpts": [
+                        "Source: https://app.example/static/app.js",
+                        "app.js:1:1",
+                        format!("Method: {method}"),
+                        format!("Endpoint candidate: {url}")
+                    ],
+                    "remediation": "review",
+                    "verification": {"method": "literal", "outcome": "not_performed", "reason": "literal"}
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "version": 1,
+            "id": id,
+            "startedAt": started,
+            "finishedAt": started,
+            "status": "completed",
+            "sent": 0,
+            "plan": {"request": {"method": "GET", "url": "https://app.example/static/app.js", "headers": {}, "body": ""}, "mode": "passive", "checks": ["js-endpoints", "js-secrets"]},
+            "baselineIds": [],
+            "evidence": [],
+            "findings": findings,
+            "checks": []
+        })
+    }
+
+    #[test]
+    fn extracts_and_deduplicates_endpoint_candidates() {
+        let storage = TrafficStorage::new(":memory:", 100_000).unwrap();
+        storage.use_temporary();
+        let first = run(
+            "js-1",
+            "2026-01-01T00:00:00Z",
+            &[
+                ("GET", "https://api.example/v1/users?id=1"),
+                ("post", "https://api.example/v1/login"),
+                ("GET", "https://api.example/v1/users?id=1"),
+            ],
+        );
+        let second = run("js-2", "2026-01-02T00:00:00Z", &[("GET", "https://api.example/v1/orders")]);
+        storage.put_scan_run(TEMP_WORKSPACE_ID, "js-1", &first).unwrap();
+        storage.put_scan_run(TEMP_WORKSPACE_ID, "js-2", &second).unwrap();
+        let (total, endpoints) = storage.js_endpoints(TEMP_WORKSPACE_ID).unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(endpoints.len(), 3);
+        let rows: Vec<(String, String)> = endpoints
+            .iter()
+            .map(|e| (e["method"].as_str().unwrap().into(), e["url"].as_str().unwrap().into()))
+            .collect();
+        assert!(rows.contains(&("GET".into(), "https://api.example/v1/users?id=1".into())));
+        assert!(rows.contains(&("POST".into(), "https://api.example/v1/login".into())));
+        assert!(rows.contains(&("GET".into(), "https://api.example/v1/orders".into())));
+        assert!(endpoints.iter().all(|e| e["source"] == "https://app.example/static/app.js"));
+    }
+
+    #[test]
+    fn skips_credentials_fragments_and_non_http_urls() {
+        let storage = TrafficStorage::new(":memory:", 100_000).unwrap();
+        storage.use_temporary();
+        let data = run(
+            "js-3",
+            "2026-01-01T00:00:00Z",
+            &[
+                ("GET", "https://user:pass@app.example/v1/secret#frag"),
+                ("GET", "ftp://app.example/file"),
+                ("POST", "not a url"),
+            ],
+        );
+        storage.put_scan_run(TEMP_WORKSPACE_ID, "js-3", &data).unwrap();
+        let (total, endpoints) = storage.js_endpoints(TEMP_WORKSPACE_ID).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(endpoints[0]["url"], "https://app.example/v1/secret");
+    }
+
+    #[test]
+    fn ignores_runs_without_the_js_endpoint_check() {
+        let storage = TrafficStorage::new(":memory:", 100_000).unwrap();
+        storage.use_temporary();
+        let mut data = run("js-4", "2026-01-01T00:00:00Z", &[("GET", "https://app.example/x")]);
+        data["plan"]["checks"] = serde_json::json!(["cookie-flags"]);
+        storage.put_scan_run(TEMP_WORKSPACE_ID, "js-4", &data).unwrap();
+        assert!(storage.js_endpoints(TEMP_WORKSPACE_ID).unwrap().1.is_empty());
+    }
 }

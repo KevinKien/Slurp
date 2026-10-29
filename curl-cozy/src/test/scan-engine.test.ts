@@ -546,3 +546,86 @@ it("does not retry or create findings if the passive response fetch fails", asyn
   expect(run.findings).toHaveLength(0);
   expect(run.message).toContain("Could not fetch");
 });
+
+describe("JavaScript endpoint follow-up scanning", () => {
+  const endpointPlan = (): ScanPlan => ({
+    ...newScanPlan(request),
+    mode: "active",
+    allowSending: true,
+    checks: ["hidden-parameters", "auth-access", "reflection"],
+    parameters: [{ kind: "query", name: "q", occurrence: 0 }],
+    jsEndpointScan: true,
+    jsEndpointOptions: { maxEndpoints: 5 },
+    rate: 20,
+  });
+  const endpointSend = vi.fn(async (input: HttpRequest) => {
+    const value = new URL(input.url).searchParams.get("q");
+    return {
+      ok: true as const,
+      ...response({ responseBody: value ? `value:${value}` : "baseline" }),
+    };
+  });
+  const drive = async (plan: ScanPlan, deps: Partial<ScanDependencies> = {}) => {
+    const save = vi.fn(async () => {});
+    const engine = new ScanEngine(plan, {
+      send: endpointSend,
+      isCurrent: () => true,
+      save,
+      jsEndpoints: async () => [
+        { method: "GET", url: "https://example.com/api/items?x=1", source: "app.js" },
+        { method: "get", url: "https://api.other.test/v1/data" },
+        { method: "GET", url: "https://blocked.test/v1/items" },
+      ],
+      allowCrawlUrl: (url) => !url.includes("blocked.test"),
+      ...deps,
+    });
+    const done = engine.start();
+    // Child engines schedule new timers after each await, so pump the fake clock in steps.
+    for (let step = 0; step < 600; step++) await vi.advanceTimersByTimeAsync(100);
+    await done;
+    return { engine, run: engine.run };
+  };
+  const calls = (pattern: string) =>
+    endpointSend.mock.calls.filter(([input]) => new URL(input.url).pathname === pattern);
+
+  it("discovers hidden parameters and scans the discovered ones on JavaScript endpoints", async () => {
+    vi.useFakeTimers();
+    endpointSend.mockClear();
+    const { run } = await drive(endpointPlan());
+    expect(run.status).toBe("completed");
+    expect(run.plan.jsEndpointScan).toBe(true);
+    const items = calls("/api/items");
+    expect(items.length).toBeGreaterThan(0);
+    expect(items.some(([input]) => new URL(input.url).searchParams.get("q") === "slurp")).toBe(true);
+    expect(
+      items.some(([input]) =>
+        [...new URL(input.url).searchParams.keys()].some((key) => key.startsWith("slurp_")),
+      ),
+    ).toBe(true);
+    const checkIds = new Set(run.checks.map((check) => check.checkId));
+    expect(checkIds).toContain("hidden-parameters");
+    expect(checkIds).toContain("auth-access");
+    expect(checkIds).toContain("reflection");
+    const hidden = run.findings.find((finding) => finding.checkId === "hidden-parameters");
+    expect(hidden?.excerpts.join(" ")).toContain("Name: q");
+    const reflection = run.findings.find((finding) => finding.checkId === "reflection");
+    expect(reflection?.endpoint).toContain("/api/items");
+    expect(run.sent).toBeGreaterThan(10);
+  });
+  it("keeps credentials off cross-origin endpoints and never leaves the target scope", async () => {
+    vi.useFakeTimers();
+    endpointSend.mockClear();
+    const { run } = await drive(endpointPlan());
+    const cross = calls("/v1/data");
+    expect(cross.length).toBeGreaterThan(0);
+    expect(
+      cross.every(
+        ([input]) =>
+          !Object.keys(input.headers).some((name) => name.toLowerCase() === "authorization") &&
+          !Object.keys(input.headers).some((name) => name.toLowerCase() === "cookie"),
+      ),
+    ).toBe(true);
+    expect(calls("/v1/items")).toHaveLength(0);
+    expect(run.sent).toBeGreaterThan(0);
+  });
+});

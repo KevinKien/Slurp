@@ -10,6 +10,7 @@ The standalone executable serves both the web UI and API. No Node.js runtime is 
 
 ## Features
 
+- **HTTP/2:** negotiated automatically over HTTPS (ALPN) on both the client and upstream sides; WebSocket handshakes stay on HTTP/1.1.
 - **HTTP History:** search and filter captured requests, browse large histories with incremental loading and virtual scrolling, bookmark requests, add notes, delete entries, and export JSON or HAR.
 - **Intercept:** hold requests and responses for inspection, edit HTTP messages, and forward or drop held traffic. Held items have no automatic expiration.
 - **WebSocket:** capture WS/WSS handshakes and bidirectional frames, inspect text or hex payloads, hold frames in Intercept, and send connections to WebSocket Replay.
@@ -17,10 +18,10 @@ The standalone executable serves both the web UI and API. No Node.js runtime is 
 - **Flows:** chain API requests into workflows and pass response values between steps.
 - **Profiles, Response Diff and Authorization Matrix:** manage account variables, headers and cookies, compare responses, and test access across accounts.
 - **Intruder:** substitute payloads with configurable concurrency, rate limits, response matching and saved results.
-- **Scan Dashboard:** monitor tasks and findings, automatically audit captured APIs for missing authentication and permissive CORS, compare disclosed PHP releases with PHP2Shell (CVE-2026-109618, CVE-2026-109619), flag HTTP2Shell (CVE-2026-111497) Brotli request-body decoding and React2Shell (CVE-2025-55182) RSC exposure, and passively discover endpoints and suspected credentials in captured JavaScript. Review evidence and pause automatic auditing from the dashboard. Manual scans use reusable Passive/Active profiles, time/rate controls and a coverage catalog. Experimental active modules cover controlled command/code/EL, LDAP/XPath/XML and local-file XXE probes, with intrusive checks explicitly selected in profiles.
+- **Scan Dashboard:** monitor tasks and findings, automatically audit captured APIs for missing authentication and permissive CORS, compare disclosed PHP releases with PHP2Shell (CVE-2026-109618, CVE-2026-109619), flag HTTP2Shell (CVE-2026-111497) Brotli request-body decoding and React2Shell (CVE-2025-55182) RSC exposure, and passively discover endpoints and suspected credentials in captured JavaScript. Review evidence and pause automatic auditing from the dashboard. Manual scans use reusable Passive/Active profiles, time/rate controls and a coverage catalog. Active scans can follow up on endpoints discovered in JavaScript with hidden-parameter, anonymous-access and parameter checks. Experimental active modules cover controlled command/code/EL, LDAP/XPath/XML and local-file XXE probes, with intrusive checks explicitly selected in profiles.
 - **Scope & Filters:** focus History and Intercept on configured target domains.
 - **Utilities:** Base64, URL, HTML and hex encoding/decoding, UUID generation, and JWT decoding.
-- **Workspaces:** organize saved traffic, Replay tabs and testing data locally.
+- **Workspaces:** organize saved traffic, Replay tabs and testing data locally. Export a workspace to a `.slurp` file (optionally redacting secrets and leaving out authentication profiles or Intruder data) and import it on another machine; import always creates a new workspace and never overwrites existing data.
 - **MCP:** let AI clients search and read traffic, create and edit Replay requests, rename tabs, and send saved requests.
 
 ## Plan
@@ -30,7 +31,6 @@ Planned development builds on the current inspection and scan capabilities:
 - **Common vulnerability scanning:** expand automated checks for common web and API vulnerabilities, with evidence and verification to reduce false positives.
 - **Specialized vulnerability scanning:** add dedicated scan workflows for individual vulnerability classes, with deeper configuration and validation.
 - **Template-based scanning:** support reusable scan templates for defining requests, payloads, matchers and verification steps.
-- **Workspace export/import:** export and import workspaces as `.slurp` files.
 - **Analysis plugins:** develop a plugin system for extending Slurp, including JavaScript analysis and endpoint discovery.
 - **Parameter discovery:** discover and test additional query, body and header parameters.
 - **GraphQL integration:** add GraphQL-aware inspection, request editing, schema exploration and security testing.

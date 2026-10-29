@@ -68,3 +68,6 @@ api-token
 
 # Local codebase analysis notes
 /CODEBASE_ANALYSIS.md
+
+# Local bug bounty research notes
+/BUG_BOUNTY_WRITEUPS.md

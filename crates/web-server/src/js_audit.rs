@@ -4,7 +4,10 @@
 use crate::auto_audit::{finding, headers, observed, request, run};
 use proxy_core::TrafficEntry;
 use serde_json::{json, Value};
+use crate::secret_rules::SECRET_RULES;
+use regex_automata::meta::Regex;
 use std::collections::HashSet;
+use std::sync::OnceLock;
 
 pub fn is_javascript(entry: &TrafficEntry) -> bool {
     let mime = entry
@@ -288,6 +291,33 @@ fn placeholder(value: &str) -> bool {
             .iter()
             .any(|s| lower.starts_with(s))
 }
+/// gitleaks-derived rules, compiled once. A rule that does not compile is dropped, not fatal.
+fn compiled_rules() -> &'static [(usize, Regex)] {
+    static RULES: OnceLock<Vec<(usize, Regex)>> = OnceLock::new();
+    RULES.get_or_init(|| {
+        SECRET_RULES
+            .iter()
+            .enumerate()
+            .filter_map(|(index, rule)| Regex::new(rule.pattern).ok().map(|regex| (index, regex)))
+            .collect()
+    })
+}
+/// Vendor token formats (standalone) and vendor-named variables (keyed) from `secret_rules.rs`.
+fn rule_kind(key: &str, value: &str) -> Option<&'static str> {
+    if value.len() < 8 || value.len() > 4096 {
+        return None;
+    }
+    let lower = value.to_ascii_lowercase();
+    compiled_rules().iter().find_map(|(index, regex)| {
+        let rule = &SECRET_RULES[*index];
+        let applies = if rule.keys.is_empty() {
+            rule.keywords.is_empty() || rule.keywords.iter().any(|word| lower.contains(word))
+        } else {
+            !key.is_empty() && rule.keys.iter().any(|name| key.contains(name))
+        };
+        (applies && regex.is_match(value)).then_some(rule.kind)
+    })
+}
 fn secret_kind(key: &str, value: &str) -> Option<&'static str> {
     if placeholder(value) {
         return None;
@@ -319,6 +349,9 @@ fn secret_kind(key: &str, value: &str) -> Option<&'static str> {
         && value.len() >= 20
     {
         return Some("API key");
+    }
+    if let Some(kind) = rule_kind(key, value) {
+        return Some(kind);
     }
     if ["username", "user", "login", "clientid"].contains(&key) {
         return Some("Username / account identifier");
@@ -426,7 +459,8 @@ pub fn scan(entry: &TrafficEntry, id: &str) -> Option<Value> {
                 continue;
             }
             let finding_id = format!("js-secret-{}", found.len());
-            let severity = if kind == "Username / account identifier" {
+            // Publishable keys are meant to ship in client code.
+            let severity = if kind == "Username / account identifier" || kind.contains("Publishable") {
                 "info"
             } else {
                 "medium"
@@ -535,6 +569,84 @@ const password='sameprefix-secret-one'; fetch('/api/one');"#), "moved").unwrap()
         }
         let storage = proxy_core::TrafficStorage::new(path.to_str().unwrap(), 1024).unwrap();
         assert!(!storage.put_unique_js_scan_run(&workspace, "next", &next).unwrap());
+    }
+    #[test]
+    fn every_generated_rule_compiles() {
+        let failed: Vec<_> = SECRET_RULES
+            .iter()
+            .filter(|rule| Regex::new(rule.pattern).is_err())
+            .map(|rule| (rule.id, Regex::new(rule.pattern).err().map(|e| e.to_string())))
+            .collect();
+        assert!(failed.is_empty(), "{failed:?}");
+    }
+    #[test]
+    fn recognizes_vendor_token_formats_and_vendor_named_variables() {
+        // Assembled at runtime so no complete credential appears in the source.
+        let slack = format!("{}-{}-{}{}", "xoxb", "1".repeat(11), "2".repeat(11), "a".repeat(24));
+        let sendgrid = format!("SG.{}.{}", "a".repeat(22), "b".repeat(43));
+        let npm = format!("npm_{}", "a1".repeat(18));
+        let gitlab = format!("glpat-{}", "a".repeat(20));
+        let anthropic = format!("sk-ant-api03-{}AA", "a".repeat(93));
+        let hex40 = "0123456789abcdef".repeat(3)[..40].to_string();
+        for (key, value, kind) in [
+            ("", slack.as_str(), "Slack Bot Token"),
+            ("", sendgrid.as_str(), "Sendgrid API Token"),
+            ("", npm.as_str(), "npm Access Token"),
+            ("", gitlab.as_str(), "GitLab PAT"),
+            ("", anthropic.as_str(), "Anthropic API Key"),
+            ("datadogapikey", hex40.as_str(), "Datadog Access Token"),
+        ] {
+            assert_eq!(secret_kind(key, value), Some(kind), "{kind}");
+        }
+        // Wrong variable name, wrong length and placeholders do not match.
+        assert_eq!(rule_kind("color", &hex40), None);
+        assert_eq!(rule_kind("datadog", "abc123"), None);
+        assert_eq!(secret_kind("", "xoxb-your-token-here"), None);
+        assert_eq!(secret_kind("", "just a normal sentence about slack xoxb"), None);
+    }
+    #[test]
+    fn recognizes_providers_missing_from_gitleaks() {
+        // Assembled at runtime so no complete credential appears in the source.
+        let r = |c: &str, n: usize| c.repeat(n);
+        let cases: Vec<(String, &str)> = vec![
+            (format!("ya29.{}", r("a1", 20)), "Google OAuth Access Token"),
+            (format!("GOCSPX-{}", r("a", 28)), "Google OAuth Client Secret"),
+            (format!("1//0{}", r("g", 45)), "Google OAuth Refresh Token"),
+            (format!("AAAA{}:APA91b{}", r("a", 7), r("b", 120)), "Firebase FCM Server Key"),
+            (format!("key-{}", r("0123456789abcdef", 2)), "Mailgun Private Key"),
+            (format!("{}{}.{}.{}", "M", r("a", 23), r("b", 6), r("c", 30)), "Discord Bot Token"),
+            (format!("https://discord.com/api/webhooks/{}/{}", r("1", 18), r("a", 40)), "Discord Webhook URL"),
+            (format!("{}:AA{}", r("1", 9), r("a", 33)), "Telegram Bot Token"),
+            (format!("gsk_{}", r("a", 52)), "Groq API Key"),
+            (format!("xai-{}", r("a", 80)), "xAI API Key"),
+            (format!("r8_{}", r("a", 37)), "Replicate API Token"),
+            (format!("re_{}_{}", r("a", 8), r("b", 24)), "Resend API Key"),
+            (format!("sk-proj-{}", r("a", 60)), "OpenAI Project API Key"),
+            (format!("sk.eyJ{}.{}", r("a", 30), r("b", 22)), "Mapbox Secret Token"),
+            (format!("whsec_{}", r("a", 40)), "Stripe Webhook Secret"),
+            (format!("pk_live_{}", r("a", 30)), "Stripe Publishable Key"),
+            (format!("sbp_{}", r("0123456789abcdef", 3)[..40].to_string()), "Supabase Access Token"),
+            (format!("dckr_pat_{}", r("a", 30)), "Docker Hub PAT"),
+            (format!("AccountKey={}==", r("a", 86)), "Azure Storage Account Key"),
+            (format!("AKID{}", r("a", 32)), "Tencent Cloud Secret ID"),
+            ("postgres://admin:s3cret-pw@db.internal:5432/app".to_string(), "Database Connection String"),
+            (format!("{}{}", "{\"type\": \"service_account\", \"private_key_id\": \"", r("a", 10)), "Google Service Account Key"),
+        ];
+        for (value, kind) in &cases {
+            assert_eq!(secret_kind("", value), Some(*kind), "{kind}: {value}");
+        }
+        assert_eq!(secret_kind("", "key-short"), None);
+        assert_eq!(secret_kind("", "https://example.com/api/webhooks/list"), None);
+    }
+    #[test]
+    fn rule_matching_stays_fast_on_many_literals() {
+        let source: String = (0..20_000)
+            .map(|i| format!("const v{i}='{:0>40x}';\n", i * 7919))
+            .collect();
+        let started = std::time::Instant::now();
+        let hits = scan(&script(&source), "perf").unwrap();
+        crate::scan::validate_run("perf", &hits).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(15), "{:?}", started.elapsed());
     }
     #[test]
     fn discovers_fetch_axios_xhr_links_and_credentials_with_coordinates_and_redaction() {

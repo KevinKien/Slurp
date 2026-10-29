@@ -86,9 +86,17 @@ export interface BusinessReadback {
   /** Exact JSON pointer in the GET response; empty means the document root. */
   pointer: string;
 }
+export interface DiscoveredEndpoint {
+  method: string;
+  url: string;
+  source?: string;
+}
 export interface ScanPlan {
   crawlBeforeScan?: boolean;
   crawlOptions?: import("./crawler").CrawlOptions;
+  /** Follow up on endpoints already extracted from captured JavaScript (requires allowSending). */
+  jsEndpointScan?: boolean;
+  jsEndpointOptions?: { maxEndpoints: number };
   businessReadback?: BusinessReadback | undefined;
   /** RSA SPKI/PKCS#1 public PEM or X.509 certificate PEM for algorithm-confusion verification; never a private key. */
   jwtPublicKey?: string;

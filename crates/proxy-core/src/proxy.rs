@@ -9,6 +9,8 @@
 use crate::ca::CertificateAuthority;
 use crate::intercept::{HoldContext, Intercept, RequestParts, ResponseParts};
 use crate::storage::{pairs_to_json, TrafficEntry, TrafficStorage};
+#[cfg(test)]
+use crate::storage::TrafficFilter;
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -259,35 +261,46 @@ where
         .await.context("Client TLS handshake timed out")?
         .with_context(|| format!("TLS handshake failed with client for {}", host))?;
 
+    let h2 = client_tls.get_ref().1.alpn_protocol() == Some(b"h2".as_slice());
     let client_io = TokioIo::new(client_tls);
 
     // 3. Now serve HTTP requests from the client over the TLS connection
     let host = host.to_string();
 
-    http1::Builder::new()
-        .timer(hyper_util::rt::TokioTimer::new())
-        .header_read_timeout(Duration::from_secs(10))
-        .preserve_header_case(true)
-        .title_case_headers(true)
-        .serve_connection(
-            client_io,
-            service_fn(move |req: Request<Incoming>| {
-                let target = Target { https: true, host: host.clone(), port };
-                let shared = shared.clone();
-                async move {
-                    let path_and_query = req
-                        .uri()
-                        .path_and_query()
-                        .map(|pq| pq.as_str())
-                        .unwrap_or("/")
-                        .to_string();
-                    proxy_request(req, target, path_and_query, &shared).await
-                }
-            }),
-        )
-        .with_upgrades()
-        .await
-        .map_err(|e| anyhow::anyhow!("HTTPS serve error: {}", e))?;
+    let service = service_fn(move |req: Request<Incoming>| {
+        let target = Target { https: true, host: host.clone(), port };
+        let shared = shared.clone();
+        async move {
+            let path_and_query = req
+                .uri()
+                .path_and_query()
+                .map(|pq| pq.as_str())
+                .unwrap_or("/")
+                .to_string();
+            proxy_request(req, target, path_and_query, &shared).await
+        }
+    });
+
+    if h2 {
+        // Streams beyond the proxy's request capacity would be rejected with 503, so let the
+        // client queue them instead of opening more than that many at once.
+        hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+            .timer(hyper_util::rt::TokioTimer::new())
+            .max_concurrent_streams(8)
+            .serve_connection(client_io, service)
+            .await
+            .map_err(|e| anyhow::anyhow!("HTTP/2 serve error: {}", e))?;
+    } else {
+        http1::Builder::new()
+            .timer(hyper_util::rt::TokioTimer::new())
+            .header_read_timeout(Duration::from_secs(10))
+            .preserve_header_case(true)
+            .title_case_headers(true)
+            .serve_connection(client_io, service)
+            .with_upgrades()
+            .await
+            .map_err(|e| anyhow::anyhow!("HTTPS serve error: {}", e))?;
+    }
 
     Ok(())
 }
@@ -343,7 +356,12 @@ async fn proxy_request(
         && req.headers().get_all("connection").iter().filter_map(|v|v.to_str().ok()).any(|v|v.split(',').any(|t|t.trim().eq_ignore_ascii_case("upgrade")));
     let client_upgrade = websocket.then(|| hyper::upgrade::on(&mut req));
     let method = req.method().to_string();
-    let headers = headers_to_pairs(req.headers());
+    let mut headers = headers_to_pairs(req.headers());
+    // HTTP/2 carries the host in :authority; keep it visible as a Host header in history/Intercept.
+    if header_value(&headers, "host").is_none() {
+        let authority = req.uri().authority().map(|a| a.to_string()).unwrap_or_else(|| target.authority());
+        headers.insert(0, ("host".to_string(), authority));
+    }
     let body = match read_body(req.into_body(),shared.body_limit).await {
         Ok(b) => b,
         Err(error) => return Ok(error_response(413, &error.to_string())),
@@ -383,7 +401,7 @@ async fn proxy_request(
         upstream_req.headers_mut().insert("connection", HeaderValue::from_static("Upgrade"));
         upstream_req.headers_mut().insert("upgrade", HeaderValue::from_static("websocket"));
     }
-    let mut upstream_res = match tokio::time::timeout(Duration::from_secs(30),send_upstream(&target, upstream_req, shared.upstream_tls.clone(),shared.management_port)).await.unwrap_or_else(|_|Err("Upstream request timed out".into())) {
+    let mut upstream_res = match tokio::time::timeout(Duration::from_secs(30),send_upstream(&target, upstream_req, shared.upstream_tls.clone(),shared.management_port,websocket)).await.unwrap_or_else(|_|Err("Upstream request timed out".into())) {
         Ok(r) => r,
         Err(e) => {
             record(shared, &target, &request, None, Some(e.clone()), start);
@@ -486,7 +504,8 @@ fn record(
 }
 
 /// Connect to the destination (with TLS for https) and send one request.
-async fn send_upstream(target: &Target, req: Request<Full<Bytes>>, tls_config: Arc<rustls::ClientConfig>, management_port:Option<u16>) -> Result<Response<Incoming>, String> {
+/// WebSocket upgrades need HTTP/1.1, so they skip HTTP/2 negotiation (`websocket`).
+async fn send_upstream(target: &Target, req: Request<Full<Bytes>>, tls_config: Arc<rustls::ClientConfig>, management_port:Option<u16>, websocket: bool) -> Result<Response<Incoming>, String> {
     let addresses:Vec<_>=tokio::net::lookup_host((target.host.trim_matches(['[',']']),target.port)).await.map_err(|e|format!("DNS lookup failed: {e}"))?.collect();
     if management_port==Some(target.port) {
         let local:Vec<_>=if_addrs::get_if_addrs().map_err(|e|format!("Cannot validate management destination: {e}"))?.into_iter().map(|i|i.ip().to_canonical()).collect();
@@ -498,11 +517,16 @@ async fn send_upstream(target: &Target, req: Request<Full<Bytes>>, tls_config: A
     if target.https {
         let server_name = rustls::pki_types::ServerName::try_from(target.host.clone())
             .map_err(|e| format!("Invalid server name: {e}"))?;
+        let tls_config = if websocket { http1_only(&tls_config) } else { tls_config };
         let tls = tokio_rustls::TlsConnector::from(tls_config)
             .connect(server_name, tcp)
             .await
             .map_err(|e| format!("TLS handshake failed: {e}"))?;
-        send_over(tls, req).await
+        if tls.get_ref().1.alpn_protocol() == Some(b"h2".as_slice()) {
+            send_over_h2(tls, req).await
+        } else {
+            send_over(tls, req).await
+        }
     } else {
         send_over(tcp, req).await
     }
@@ -531,20 +555,65 @@ where
         .map_err(|e| format!("Upstream error: {e}"))
 }
 
-/// TLS settings for talking to real servers, built once.
+/// Run an HTTP/2 exchange over an established TLS connection.
+///
+/// HTTP/2 has no Host header: the authority travels in `:authority`, so the request is rewritten
+/// to absolute form with the Host value (or the URI's own authority) as that authority.
+async fn send_over_h2<T>(io: T, req: Request<Full<Bytes>>) -> Result<Response<Incoming>, String>
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut parts, body) = req.into_parts();
+    let authority = parts
+        .headers
+        .remove(hyper::header::HOST)
+        .and_then(|v| v.to_str().ok().map(str::to_string))
+        .or_else(|| parts.uri.authority().map(|a| a.to_string()))
+        .ok_or("Request has no host")?;
+    let path = parts.uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    parts.uri = format!("https://{authority}{path}")
+        .parse()
+        .map_err(|e| format!("Invalid HTTP/2 request target: {e}"))?;
+    parts.version = hyper::Version::HTTP_2;
+
+    let (mut sender, conn) = hyper::client::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+        .timer(hyper_util::rt::TokioTimer::new())
+        .handshake(TokioIo::new(io))
+        .await
+        .map_err(|e| format!("HTTP/2 handshake error: {e}"))?;
+    tokio::spawn(async move {
+        if let Err(e) = conn.await {
+            debug!("Upstream HTTP/2 connection error: {}", e);
+        }
+    });
+
+    sender
+        .send_request(Request::from_parts(parts, body))
+        .await
+        .map_err(|e| format!("Upstream error: {e}"))
+}
+
+/// TLS settings for talking to real servers, built once. Offers HTTP/2 and HTTP/1.1.
 fn client_tls_config() -> Arc<rustls::ClientConfig> {
     static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
     CONFIG
         .get_or_init(|| {
             let mut roots = rustls::RootCertStore::empty();
             roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-            Arc::new(
-                rustls::ClientConfig::builder()
-                    .with_root_certificates(roots)
-                    .with_no_client_auth(),
-            )
+            let mut config = rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+            Arc::new(config)
         })
         .clone()
+}
+
+/// Same trust roots as `config`, but HTTP/1.1 only (required for WebSocket upgrades).
+fn http1_only(config: &Arc<rustls::ClientConfig>) -> Arc<rustls::ClientConfig> {
+    let mut config = (**config).clone();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Arc::new(config)
 }
 
 /// Headers that describe a single connection and must not be relayed, plus the ones the
@@ -762,5 +831,62 @@ mod resource_tests {
         let listener=TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
         let task=tokio::spawn(async move{let (mut stream,_)=listener.accept().await.unwrap();let mut bytes=[0u8;4096];stream.read(&mut bytes).await.unwrap();stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 33\r\nConnection: close\r\n\r\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx").await.unwrap();});
         let response=request(32,None,address,b"",8).await;assert!(response.starts_with("HTTP/1.1 502"),"{response}");assert!(response.contains("buffering limit"));task.await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod http2_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt,AsyncWriteExt};
+    use hyper_util::rt::TokioExecutor;
+
+    /// Client -> proxy (h2 over MITM TLS) -> upstream (h2 over TLS), captured in history.
+    #[tokio::test]
+    async fn proxies_http2_in_both_directions_and_captures_it() {
+        tokio::time::timeout(Duration::from_secs(10),async {
+            let dir=tempfile::tempdir().unwrap();let ca=Arc::new(CertificateAuthority::load_or_create(dir.path()).unwrap());
+            let mut roots=rustls::RootCertStore::empty();
+            for cert in rustls_pemfile::certs(&mut std::io::Cursor::new(ca.ca_cert_pem())) {roots.add(cert.unwrap()).unwrap();}
+            let mut client_config=rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
+            client_config.alpn_protocols=vec![b"h2".to_vec(),b"http/1.1".to_vec()];
+            let config=Arc::new(client_config);
+            let storage=TrafficStorage::new(":memory:",1024).unwrap();
+            let shared=Shared{storage:storage.clone(),intercept:Intercept::new(storage.clone()),upstream_tls:config.clone(),connections:Arc::new(Semaphore::new(64)),requests:Arc::new(Semaphore::new(8)),body_limit:10*1024*1024,management_port:None};
+
+            let upstream=TcpListener::bind("127.0.0.1:0").await.unwrap();let port=upstream.local_addr().unwrap().port();
+            let tls_server=ca.get_server_config("localhost").unwrap();
+            let server=tokio::spawn(async move {
+                let (stream,_)=upstream.accept().await.unwrap();
+                let tls=TlsAcceptor::from(tls_server).accept(stream).await.unwrap();
+                assert_eq!(tls.get_ref().1.alpn_protocol(),Some(b"h2".as_slice()));
+                let service=service_fn(|req:Request<Incoming>|async move {
+                    let seen=format!("{:?} {} {}",req.version(),req.uri().authority().map(|a|a.as_str()).unwrap_or(""),req.uri().path());
+                    Ok::<_,hyper::Error>(Response::new(Full::new(Bytes::from(seen))))
+                });
+                hyper::server::conn::http2::Builder::new(TokioExecutor::new()).serve_connection(TokioIo::new(tls),service).await.unwrap();
+            });
+
+            let proxy=TcpListener::bind("127.0.0.1:0").await.unwrap();let addr=proxy.local_addr().unwrap();
+            tokio::spawn(async move {let (stream,_)=proxy.accept().await.unwrap();let _=handle_client(stream,ca,shared).await;});
+            let mut client=TcpStream::connect(addr).await.unwrap();client.write_all(format!("CONNECT localhost:{port} HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n").as_bytes()).await.unwrap();
+            let mut head=Vec::new();while !head.ends_with(b"\r\n\r\n") {head.push(client.read_u8().await.unwrap());}assert!(String::from_utf8(head).unwrap().starts_with("HTTP/1.1 200"));
+            let tls=tokio_rustls::TlsConnector::from(config).connect(rustls::pki_types::ServerName::try_from("localhost").unwrap(),client).await.unwrap();
+            assert_eq!(tls.get_ref().1.alpn_protocol(),Some(b"h2".as_slice()),"proxy must offer h2 to the client");
+
+            let (mut sender,conn)=hyper::client::conn::http2::Builder::new(TokioExecutor::new()).handshake(TokioIo::new(tls)).await.unwrap();
+            tokio::spawn(conn);
+            let request=Request::builder().uri(format!("https://localhost:{port}/h2/path?q=1")).body(Full::new(Bytes::new())).unwrap();
+            let response=sender.send_request(request).await.unwrap();
+            assert_eq!(response.status(),200);
+            let body=response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(String::from_utf8(body.to_vec()).unwrap(),format!("HTTP/2.0 localhost:{port} /h2/path"));
+
+            let entries=storage.list(10,0,&TrafficFilter{workspace:Some(crate::TEMP_WORKSPACE_ID),..Default::default()}).unwrap();
+            assert_eq!(entries.len(),1);
+            assert_eq!(entries[0].status_code,200);
+            assert_eq!(entries[0].path,"/h2/path");
+            assert!(entries[0].request_headers.to_ascii_lowercase().contains(&format!("localhost:{port}")),"Host recorded from :authority");
+            drop(server);
+        }).await.unwrap();
     }
 }

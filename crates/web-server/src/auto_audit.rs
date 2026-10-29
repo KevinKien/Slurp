@@ -674,6 +674,12 @@ async fn audit_api(
         .as_object_mut()?
         .insert("origin".into(), json!("https://evil.com"));
     for (check, request) in [("noauthen", anonymous), ("cors", cors)] {
+        // Without a recognized credential the "anonymous" request equals the original one, so a
+        // 200 proves nothing about authentication. Count it as clean and send nothing.
+        if check == "noauthen" && removed.is_empty() {
+            checks.push(json!({"checkId":check,"status":"passed","message":"Request carried no recognized credentials; nothing to remove, so no authentication comparison was made","findingIds":[]}));
+            continue;
+        }
         if !state.enabled() || !intercept.scope().matches(&entry.host) {
             checks.push(json!({"checkId":check,"status":"skipped","message":"Automatic audit disabled or target left scope","findingIds":[]}));
             continue;
@@ -786,6 +792,28 @@ mod tests {
         })
         .await
         .expect("Automatic run did not finish")
+    }
+    #[tokio::test]
+    async fn requests_without_credentials_skip_noauthen_and_send_only_cors() {
+        let received = Arc::new(std::sync::Mutex::new(0usize));
+        let seen = received.clone();
+        let app = Router::new().route("/api/test", any(move || {
+            let seen = seen.clone();
+            async move { *seen.lock().unwrap() += 1; (StatusCode::OK, "{}") }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut entry = captured(&format!("http://{addr}/api/test"));
+        entry.request_headers = r#"{"Content-Type":["application/json"]}"#.into();
+        let storage = TrafficStorage::new(":memory:", 1000000).unwrap();
+        let intercept = Intercept::new(storage.clone());
+        let (state, _runtime) = start(storage, intercept.clone());
+        let run = audit_api(&entry, "id", &state, &intercept).await.unwrap();
+        assert_eq!(*received.lock().unwrap(), 1);
+        assert!(run["findings"].as_array().unwrap().iter().all(|f| f["checkId"] != "noauthen"));
+        let noauthen = run["checks"].as_array().unwrap().iter().find(|c| c["checkId"] == "noauthen").unwrap();
+        assert_eq!(noauthen["status"], "passed");
     }
     #[test]
     fn removes_case_insensitive_credentials_without_changing_other_query_values() {

@@ -6,6 +6,7 @@ import {
   probeHttpProtocol,
   probeHostHeader,
   lookupDependency,
+  fetchJsEndpoints,
   validateBrowserSnapshot,
   issueOastProbe,
   publishJwtKey,
@@ -123,6 +124,8 @@ export function ScanProvider({ children }: { children: ReactNode }) {
   };
   const start = (plan: ScanPlan, profileId?: string | null) => {
     if (!auth.ready) throw Error("Wait for profiles to load.");
+    if (plan.jsEndpointScan && !workspace)
+      throw Error("Choose a workspace before scanning JavaScript-discovered endpoints.");
     const destination = workspace,
       destinationKey = key;
     // Observed traffic is inspected exactly as captured. Active scans snapshot the chosen profile once.
@@ -130,6 +133,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       plan.mode !== "passive" || !plan.observed ? auth.createSession(profileId, variables) : null;
     const prepared = {
       ...structuredClone(plan),
+      jsEndpointScan: plan.mode !== "passive" && plan.jsEndpointScan === true,
       allowSending:
         plan.allowSending || (!plan.crawlBeforeScan && plan.mode === "passive" && !plan.observed),
       request: identity
@@ -150,6 +154,10 @@ export function ScanProvider({ children }: { children: ReactNode }) {
               .includes(new URL(url).hostname.toLowerCase().replace(/\.$/, ""))
           );
         },
+        ...(workspace && {
+          jsEndpoints: () =>
+            fetchJsEndpoints(workspace).then((result) => result.endpoints),
+        }),
         browser: validateBrowserSnapshot,
         protocol: probeHttpProtocol,
         hostHeader: probeHostHeader,

@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
-import { ArrowUpRight, Check, Folder, Layers, Pencil, Plus, Radio, Search, Trash2, TriangleAlert, X } from 'lucide-react';
+import { ExportWorkspaceDialog, ImportWorkspaceButton } from '@/components/workspace-archive';
+import { ArrowUpRight, Check, Download, Folder, Layers, Pencil, Plus, Radio, Search, Trash2, TriangleAlert, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -33,6 +34,7 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(workspace.name);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [busy, setBusy] = useState(false);
   const isDefault = workspace.id === DEFAULT_ID;
   const viewing = view === workspace.id;
@@ -138,6 +140,9 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
           <Radio className="size-3" />
           Capture here
         </Button>
+        <Button variant="ghost" size="icon" className="size-8 text-muted-foreground" aria-label={`Export ${workspace.name}`} title="Export as .slurp file" disabled={busy} onClick={() => setExporting(true)}>
+          <Download />
+        </Button>
         <Button variant="ghost" size="icon" className="size-8 text-muted-foreground" aria-label={`Rename ${workspace.name}`} disabled={busy} onClick={() => setEditing(true)}>
           <Pencil />
         </Button>
@@ -153,6 +158,7 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
           <Trash2 />
         </Button>
       </div>
+      <ExportWorkspaceDialog workspace={workspace} open={exporting} onOpenChange={setExporting} />
       <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
         <DialogContent className="bg-card">
           <DialogHeader>
@@ -318,6 +324,7 @@ export function WorkspacesView() {
               <Plus />
               Create workspace
             </Button>
+            <ImportWorkspaceButton />
             <div className="relative ml-auto min-w-0 max-w-64 flex-1">
               <Search className="absolute left-3 top-2.5 size-3.5 text-muted-foreground" />
               <input

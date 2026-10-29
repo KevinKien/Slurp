@@ -2,6 +2,8 @@ pub mod ca;
 pub mod intercept;
 pub mod proxy;
 pub mod storage;
+pub mod archive;
+pub use archive::{ArchiveError, ExportOptions, ImportSummary};
 
 pub use ca::CertificateAuthority;
 pub use intercept::{

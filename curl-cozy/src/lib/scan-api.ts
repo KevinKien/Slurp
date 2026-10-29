@@ -53,6 +53,13 @@ export const fetchScanRuns = (workspace: string, offset = 0) =>
   apiFetch<{ data: ScanSummary[]; has_more: boolean }>(`${base(workspace)}?offset=${offset}`);
 export const deleteScanRun = (workspace: string, id: string) =>
   apiFetch<void>(`${base(workspace)}/${encodeURIComponent(id)}`, { method: "DELETE" });
+/** Endpoint candidates the automatic JavaScript audit already extracted in this workspace. */
+export const fetchJsEndpoints = (workspace: string) =>
+  apiFetch<{
+    total: number;
+    truncated: boolean;
+    endpoints: import("./scan/types").DiscoveredEndpoint[];
+  }>(`/api/workspaces/${encodeURIComponent(workspace)}/js-endpoints`);
 
 export interface DashboardFinding {
   runId: string;

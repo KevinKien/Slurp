@@ -16,9 +16,11 @@ mod php2shell;
 mod http2shell;
 mod react2shell;
 mod js_audit;
+mod secret_rules;
 pub mod security;
 pub mod proxy_settings;
 pub mod flows;
+pub mod workspace_archive;
 pub mod origin;
 pub mod replay;
 pub mod http_sender;
@@ -99,6 +101,7 @@ pub async fn serve(listener: tokio::net::TcpListener, storage: Arc<TrafficStorag
         .route("/api/workspaces/:id/intruder-runs/:run/results", get(intruder::list_results))
         .route("/api/workspaces/:id/intruder-runs/:run/results/:index", get(intruder::get_result).put(intruder::put_result))
         .route("/api/workspaces/:id/scan-findings",get(scan::list_findings))
+        .route("/api/workspaces/:id/js-endpoints",get(scan::list_js_endpoints))
         .route("/api/workspaces/:id/scan-runs",get(scan::list_runs))
         .route("/api/workspaces/:id/scan-runs/:run",get(scan::get_run).put(scan::put_run).delete(scan::delete_run))
         // Workspaces
@@ -108,6 +111,8 @@ pub async fn serve(listener: tokio::net::TcpListener, storage: Arc<TrafficStorag
             axum::routing::patch(api::rename_workspace).delete(api::delete_workspace),
         )
         .route("/api/workspaces/:id/activate", post(api::activate_workspace))
+        .route("/api/workspaces/:id/export", get(workspace_archive::export))
+        .route("/api/workspaces/import", post(workspace_archive::import).layer(axum::extract::DefaultBodyLimit::disable()))
         .route("/api/workspaces/:id/replay", get(api::get_replay_tabs).put(api::put_replay_tabs))
         .route("/api/workspaces/:id/replay/tabs", post(replay::create))
         .route("/api/workspaces/:id/replay/tabs/:tab", axum::routing::patch(replay::edit))

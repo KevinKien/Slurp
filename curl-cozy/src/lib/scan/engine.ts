@@ -7,10 +7,12 @@ import { compareResponses, defaultDiffOptions } from "../response-diff";
 import { validateFinalRequest } from "../intruder";
 import { getScanCheck } from "./checks";
 import { withoutCredentials } from "./http-checks";
-import { mutateParameter, parameterKey, withHeader } from "./parameters";
+import { isFormRequest, mutateParameter, parameterKey, withHeader } from "./parameters";
 import type { HttpRequest } from "../traffic";
 import type {
+  CheckId,
   CheckResult,
+  DiscoveredEndpoint,
   Exchange,
   Finding,
   ScanEvidence,
@@ -46,6 +48,17 @@ export function validateScanPlan(plan: ScanPlan) {
     throw Error("Invalid crawl option.");
   if (plan.crawlBeforeScan && !plan.allowSending)
     throw Error("Crawling requires permission to send requests.");
+  if (plan.jsEndpointScan !== undefined && typeof plan.jsEndpointScan !== "boolean")
+    throw Error("Invalid JavaScript endpoint option.");
+  if (plan.jsEndpointScan && !plan.allowSending)
+    throw Error("Following JavaScript endpoints requires permission to send requests.");
+  if (
+    plan.jsEndpointOptions &&
+    (!Number.isInteger(plan.jsEndpointOptions.maxEndpoints) ||
+      plan.jsEndpointOptions.maxEndpoints < 1 ||
+      plan.jsEndpointOptions.maxEndpoints > 20)
+  )
+    throw Error("JavaScript endpoint limit: 1–20 endpoints.");
   if (
     plan.crawlOptions &&
     (!Number.isInteger(plan.crawlOptions.maxUrls) ||
@@ -199,6 +212,8 @@ export interface ScanDependencies {
     options?: { timeoutMs: number },
   ) => Promise<({ ok: true } & ScanResponse) | { ok: false; error: string }>;
   allowCrawlUrl?: (url: string) => boolean;
+  /** Endpoints already extracted from captured JavaScript by the automatic audit. */
+  jsEndpoints?: () => Promise<DiscoveredEndpoint[]>;
   isCurrent: () => boolean;
   onChange?: (run: ScanRun) => void;
   /** Called once, after execution. Retrying persistence must not repeat HTTP. */
@@ -209,6 +224,7 @@ export interface ScanDependencies {
 class Halt extends Error {}
 export class ScanEngine {
   private crawlChild: ScanEngine | undefined;
+  private endpointChild: ScanEngine | undefined;
   private state: ScanRun;
   private original: ScanPlan;
   private started = false;
@@ -275,6 +291,7 @@ export class ScanEngine {
   stop() {
     if (this.started && this.active) {
       this.crawlChild?.stop();
+      this.endpointChild?.stop();
       this.cancelled = true;
       this.paused = false;
       this.wake();
@@ -283,6 +300,7 @@ export class ScanEngine {
   pause() {
     if (this.active && !this.cancelled) {
       this.crawlChild?.pause();
+      this.endpointChild?.pause();
       this.paused = true;
       this.emit({ status: "paused" });
       this.wake();
@@ -291,6 +309,7 @@ export class ScanEngine {
   resume() {
     if (this.active && this.paused && !this.cancelled) {
       this.crawlChild?.resume();
+      this.endpointChild?.resume();
       this.paused = false;
       this.emit({ status: "running" });
       this.wake();
@@ -653,6 +672,211 @@ export class ScanEngine {
       crawl: { ...this.state.crawl!, phase: "scanning" },
     });
   }
+  /**
+   * Active follow-up for endpoints already extracted from captured JavaScript.
+   * Phase 1 rediscovers hidden inputs and anonymous access on the endpoint itself; phase 2 runs the
+   * profile's per-parameter checks on the inputs phase 1 confirmed.
+   */
+  private async scanJsEndpoints() {
+    const allowed = (url: string) => this.deps.allowCrawlUrl?.(url) !== false;
+    const candidates = (await this.deps.jsEndpoints?.()) ?? [];
+    const limit = Math.max(1, Math.min(20, this.original.jsEndpointOptions?.maxEndpoints ?? 10));
+    const seen = new Set<string>();
+    const targets: DiscoveredEndpoint[] = [];
+    for (const candidate of candidates) {
+      let url: URL;
+      try {
+        url = new URL(candidate.url);
+      } catch {
+        continue;
+      }
+      if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) continue;
+      url.hash = "";
+      const key = `${candidate.method.toUpperCase()} ${url.href}`;
+      if (seen.has(key) || !allowed(url.href)) continue;
+      seen.add(key);
+      targets.push({
+        method: candidate.method,
+        url: url.href,
+        ...(candidate.source && { source: candidate.source }),
+      });
+      if (targets.length >= limit) break;
+    }
+    if (!targets.length) {
+      this.emit({
+        message: "No JavaScript endpoint candidates were available for follow-up scanning",
+      });
+      return;
+    }
+    this.emit({ message: `Scanning ${targets.length} JavaScript endpoint candidate(s)` });
+    const baseOrigin = new URL(this.original.request.url).origin;
+    for (const target of targets) {
+      await this.ready();
+      const request = this.endpointRequest(target, baseOrigin);
+      if (!request) continue;
+      const settings = this.endpointSettings(request);
+      const discovery = await this.runEndpointChild(
+        {
+          ...settings,
+          policy: this.discoveryPolicy(),
+          checks: ["hidden-parameters", "auth-access"],
+        },
+        request.url,
+        `Hidden parameters and anonymous access: ${request.method} ${request.url}`,
+      );
+      const discovered = discoveredParameters(discovery.findings);
+      if (!discovered.length) continue;
+      const augmented = discovered.reduce(
+        (next, item) => withDiscoveredParameter(next, item.channel, item.name),
+        request,
+      );
+      const names = new Set(discovered.map((item) => item.name));
+      const parameters = scanParameters(augmented)
+        .filter((parameter) =>
+          parameter.kind === "json"
+            ? names.has(parameter.pointer.replace(/^\//, ""))
+            : names.has(parameter.name),
+        )
+        .slice(0, 10);
+      if (!parameters.length) continue;
+      const selected = this.original.checks.filter((id) => getScanCheck(id).perParameter);
+      const fallback: CheckId[] = ["reflection", "open-redirect"];
+      const checks = [...new Set(selected.length ? selected : fallback)];
+      await this.runEndpointChild(
+        { ...settings, request: augmented, checks, parameters },
+        request.url,
+        `Discovered parameters: ${request.method} ${request.url}`,
+      );
+    }
+    this.emit({ message: `JavaScript endpoint follow-up complete: ${targets.length} endpoint(s)` });
+  }
+  private endpointSettings(request: HttpRequest): ScanPlan {
+    const {
+      observed: _observed,
+      crawlBeforeScan: _crawl,
+      crawlOptions: _crawlOptions,
+      businessReadback: _readback,
+      jsEndpointScan: _scan,
+      jsEndpointOptions: _options,
+      ...settings
+    } = this.original;
+    return {
+      ...settings,
+      mode: "active",
+      allowSending: true,
+      request,
+      checks: ["hidden-parameters"],
+      parameters: [],
+    };
+  }
+  /** Discovery is intrusive and experimental; the explicit endpoint option is the opt-in. */
+  private discoveryPolicy(): NonNullable<ScanPlan["policy"]> {
+    return {
+      ...(this.original.policy ?? defaultScanPolicy),
+      maxImpact: "intrusive",
+      allowIntrusive: true,
+      includeExperimental: true,
+    };
+  }
+  /** Endpoint requests keep the session's authentication only on the captured origin. */
+  private endpointRequest(endpoint: DiscoveredEndpoint, baseOrigin: string): HttpRequest | undefined {
+    const method = ["GET", "POST", "PUT", "PATCH"].includes(endpoint.method.toUpperCase())
+      ? endpoint.method.toUpperCase()
+      : "GET";
+    const sameOrigin = new URL(endpoint.url).origin === baseOrigin;
+    const base: HttpRequest = {
+      method,
+      url: endpoint.url,
+      headers: { ...this.original.request.headers },
+      body: "",
+    };
+    const headers = sameOrigin ? base.headers : withoutCredentials(base).request.headers;
+    for (const name of Object.keys(headers)) {
+      const lower = name.toLowerCase();
+      if (
+        ["host", "content-length", "content-type", "connection", "transfer-encoding", "expect"].includes(
+          lower,
+        ) ||
+        (!sameOrigin && (["origin", "referer"].includes(lower) || lower.startsWith("sec-")))
+      )
+        delete headers[name];
+    }
+    return { method, url: endpoint.url, headers, body: "" };
+  }
+  private async runEndpointChild(
+    plan: ScanPlan,
+    endpointUrl: string,
+    label: string,
+  ): Promise<ScanRun> {
+    const endpointOrigin = new URL(endpointUrl).origin;
+    const allowed = (url: string) => {
+      try {
+        if (new URL(url).origin !== endpointOrigin) return false;
+      } catch {
+        return false;
+      }
+      return this.deps.allowCrawlUrl?.(url) !== false;
+    };
+    const { receive: _receive, ...inherited } = this.deps;
+    const base = this.run;
+    const child = new ScanEngine(
+      plan,
+      {
+        ...inherited,
+        isCurrent: () => !this.cancelled && this.deps.isCurrent() && allowed(endpointUrl),
+        send: async (request, options) => {
+          await this.ready();
+          if (!allowed(request.url))
+            throw new Halt("JavaScript endpoint scan stayed outside the endpoint origin.");
+          if (
+            this.state.bytes +
+              new TextEncoder().encode(JSON.stringify(request)).length +
+              512000 >
+            8_000_000
+          )
+            throw new Halt("JavaScript endpoint evidence budget reached.");
+          while (this.nextTime > Date.now()) {
+            await this.wait(this.nextTime - Date.now());
+            await this.ready();
+          }
+          this.nextTime = Date.now() + Math.max(1000 / this.original.rate, this.original.delay);
+          return this.deps.send(request, options);
+        },
+        ...(this.deps.hostHeader && {
+          hostHeader: async (input) => {
+            await this.ready();
+            if (!allowed(input.request.url))
+              throw new Halt("JavaScript endpoint scan target is outside the endpoint origin.");
+            while (this.nextTime > Date.now()) {
+              await this.wait(this.nextTime - Date.now());
+              await this.ready();
+            }
+            this.nextTime = Date.now() + Math.max(1000 / this.original.rate, this.original.delay);
+            return this.deps.hostHeader!(input);
+          },
+        }),
+        onChange: (run) =>
+          this.emit({
+            sent: base.sent + run.sent,
+            bytes: base.bytes + run.bytes,
+            evidence: [...base.evidence, ...run.evidence],
+            findings: [...base.findings, ...run.findings],
+            checks: [...base.checks, ...run.checks],
+            domAudits: [...(base.domAudits ?? []), ...(run.domAudits ?? [])],
+            message: `${label}${run.message ? " — " + run.message : ""}`,
+          }),
+        save: async () => {},
+      },
+      this.state.profileId
+        ? { id: this.state.profileId, name: this.state.profileName ?? "" }
+        : undefined,
+    );
+    this.endpointChild = child;
+    const completed = await child.start();
+    this.endpointChild = undefined;
+    if (completed.status === "stopped") throw new Halt(completed.message);
+    return completed;
+  }
   async start(): Promise<ScanRun> {
     if (this.started) throw Error("This scan engine has already started.");
     this.started = true;
@@ -660,6 +884,7 @@ export class ScanEngine {
     const baselines: Exchange[] = [];
     try {
       if (this.original.crawlBeforeScan) await this.crawlBeforeScan();
+      if (this.original.jsEndpointScan) await this.scanJsEndpoints();
       if (this.original.mode === "passive") {
         this.guard();
         const observed = this.original.observed;
@@ -1181,4 +1406,56 @@ export class ScanEngine {
       this.saveError = error instanceof Error ? error.message : "Could not save scan evidence";
     }
   }
+}
+
+function discoveredParameters(
+  findings: Finding[],
+): { channel: "query" | "body"; name: string }[] {
+  const found = new Map<string, { channel: "query" | "body"; name: string }>();
+  for (const finding of findings) {
+    if (finding.checkId !== "hidden-parameters") continue;
+    const channel = finding.excerpts
+      .map((excerpt) => /^Channel: (query|body)$/.exec(excerpt)?.[1])
+      .find((value): value is "query" | "body" => value === "query" || value === "body");
+    const name = finding.excerpts
+      .map((excerpt) => /^Name: ([A-Za-z][\w-]{0,63})$/.exec(excerpt)?.[1])
+      .find((value): value is string => !!value);
+    if (!channel || !name) continue;
+    found.set(`${channel}:${name}`, { channel, name });
+  }
+  return [...found.values()].slice(0, 10);
+}
+/** Adds a discovered name so the regular parameter checks can mutate it. */
+function withDiscoveredParameter(
+  request: HttpRequest,
+  channel: "query" | "body",
+  name: string,
+): HttpRequest {
+  const next = structuredClone(request);
+  if (channel === "query") {
+    const hash = next.url.indexOf("#");
+    const end = hash < 0 ? next.url.length : hash;
+    const head = next.url.slice(0, end);
+    next.url = `${head}${head.includes("?") ? "&" : "?"}${encodeURIComponent(name)}=slurp${next.url.slice(end)}`;
+    return next;
+  }
+  if (isFormRequest(next)) {
+    next.body += `${next.body ? "&" : ""}${encodeURIComponent(name)}=slurp`;
+    return next;
+  }
+  try {
+    const root: unknown = JSON.parse(next.body);
+    if (root && typeof root === "object" && !Array.isArray(root)) {
+      Object.defineProperty(root, name, {
+        value: "slurp",
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+      next.body = JSON.stringify(root);
+    }
+  } catch {
+    /* Not a JSON body; the discovered name cannot be added. */
+  }
+  return next;
 }

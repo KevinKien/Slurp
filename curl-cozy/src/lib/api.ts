@@ -233,6 +233,34 @@ export async function activateWorkspace(id: string): Promise<void> {
   await apiFetch<void>(`/api/workspaces/${encodeURIComponent(id)}/activate`, { method: "POST" });
 }
 
+export interface WorkspaceExportOptions { profiles: boolean; intruder: boolean; redact: boolean }
+export interface WorkspaceImportResult { workspace: Workspace; rows: number }
+
+async function failure(res: Response): Promise<Error> {
+  const detail = await res.json().then((b: { error?: string }) => b.error, () => undefined);
+  return new Error(detail ?? `API ${res.status}: ${res.statusText}`);
+}
+
+/** Downloads a workspace as a `.slurp` file (the server names it after the workspace). */
+export async function exportWorkspace(id: string, options: WorkspaceExportOptions): Promise<{ blob: Blob; filename: string }> {
+  const query = new URLSearchParams({ profiles: String(options.profiles), intruder: String(options.intruder), redact: String(options.redact) });
+  const res = await authorizedFetch(`${API_BASE}/api/workspaces/${encodeURIComponent(id)}/export?${query}`);
+  if (!res.ok) throw await failure(res);
+  const filename = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") ?? "")?.[1] ?? "workspace.slurp";
+  return { blob: await res.blob(), filename };
+}
+
+/** Creates a new workspace from a `.slurp` file. */
+export async function importWorkspace(file: File): Promise<WorkspaceImportResult> {
+  const res = await authorizedFetch(`${API_BASE}/api/workspaces/import`, {
+    method: "POST",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: file,
+  });
+  if (!res.ok) throw await failure(res);
+  return res.json();
+}
+
 export async function fetchInfo(): Promise<ProxyInfo> {
   return apiFetch<ProxyInfo>("/api/info");
 }

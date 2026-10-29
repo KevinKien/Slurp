@@ -387,6 +387,22 @@ pub async fn list_findings(
         json!({"total":total,"has_more":offset+data.len()<total,"data":data}),
     ))
 }
+/// Endpoint candidates already extracted from captured JavaScript, for active follow-up scans.
+/// Read-only and bounded: at most 200 audit runs and 200 unique endpoints.
+pub async fn list_js_endpoints(
+    State(storage): State<Arc<TrafficStorage>>,
+    Path(workspace): Path<String>,
+) -> Result<Json<Value>, Error> {
+    if workspace != proxy_core::storage::TEMP_WORKSPACE_ID {
+        storage.get_intruder_document(&workspace).map_err(storage_error)?;
+    }
+    let (total, endpoints) = storage.js_endpoints(&workspace).map_err(storage_error)?;
+    Ok(Json(json!({
+        "total": total,
+        "truncated": total > endpoints.len(),
+        "endpoints": endpoints
+    })))
+}
 #[cfg(test)]
 mod tests {
     use super::*;

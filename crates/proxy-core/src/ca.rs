@@ -218,10 +218,12 @@ impl CertificateAuthority {
         let private_key =
             PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(domain_key_pair.serialize_der()));
 
-        let config = ServerConfig::builder()
+        let mut config = ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(cert_chain, private_key)
             .context("Failed to build TLS ServerConfig")?;
+        // Let clients choose HTTP/2; the proxy serves whichever protocol is negotiated.
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
         info!("🔐 Generated cert for: {}", domain);
 

@@ -26,6 +26,7 @@ base64 = "0.22"
 tempfile = "3"
 tokio-rustls = { workspace = true }
 webpki-roots = "1"
+regex-automata = "0.4"
 
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 

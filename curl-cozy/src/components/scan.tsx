@@ -250,6 +250,55 @@ export function ScanView() {
                     </>
                   )}
                 </div>
+                <div className="space-y-3 rounded border p-3">
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      aria-label="Scan JavaScript endpoints"
+                      checked={plan.jsEndpointScan ?? false}
+                      disabled={plan.mode === "passive"}
+                      onChange={(e) => update({ jsEndpointScan: e.target.checked })}
+                    />
+                    Scan endpoints discovered in JavaScript
+                  </label>
+                  {plan.mode === "passive" && (
+                    <p className="text-xs text-muted-foreground">
+                      Requires an active scan profile.
+                    </p>
+                  )}
+                  {plan.jsEndpointScan && plan.mode !== "passive" && (
+                    <>
+                      <p className="text-xs text-muted-foreground">
+                        Uses the endpoint candidates the automatic JavaScript audit already extracted
+                        in the open workspace. Each endpoint is checked for hidden parameters and
+                        anonymous access, then the selected parameter checks run against every
+                        discovered parameter. The endpoint's own origin is the only host contacted;
+                        cross-origin endpoints are scanned without the session's credentials.
+                      </p>
+                      <label className="text-xs">
+                        Maximum endpoints
+                        <input
+                          aria-label="JavaScript endpoint limit"
+                          className={`${input} block w-28`}
+                          type="number"
+                          min={1}
+                          max={20}
+                          value={plan.jsEndpointOptions?.maxEndpoints ?? 10}
+                          onChange={(e) =>
+                            update({
+                              jsEndpointOptions: { maxEndpoints: Number(e.target.value) },
+                            })
+                          }
+                        />
+                      </label>
+                      {!plan.allowSending && (
+                        <p className="text-xs text-destructive">
+                          Enable sending requests below to scan JavaScript endpoints.
+                        </p>
+                      )}
+                    </>
+                  )}
+                </div>
                 {plan.checks.includes("jwt-confusion") && (
                   <label className="block space-y-2 text-sm">
                     <span>JWT RSA public key or certificate (PEM)</span>
@@ -475,8 +524,10 @@ export function ScanView() {
                       />
                       I allow this scan to send requests for all selected checks to{" "}
                       {plan.crawlBeforeScan
-                        ? "the original and discovered endpoints"
-                        : "this endpoint"}
+                        ? "the original and crawled endpoints"
+                        : plan.jsEndpointScan
+                          ? "this endpoint and the JavaScript-discovered endpoints"
+                          : "this endpoint"}
                       , including repeated baseline and control requests.
                     </label>
                   </>
@@ -501,9 +552,11 @@ export function ScanView() {
                 >
                   {plan.crawlBeforeScan
                     ? "Crawl and scan"
-                    : plan.mode === "passive"
-                      ? "Inspect response"
-                      : "Start scan"}
+                    : plan.jsEndpointScan
+                      ? "Scan endpoints"
+                      : plan.mode === "passive"
+                        ? "Inspect response"
+                        : "Start scan"}
                 </Button>
               </div>
             </section>
