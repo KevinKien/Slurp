@@ -7,10 +7,10 @@ use crate::storage::{TrafficStorage, Workspace, DEFAULT_WORKSPACE_ID, TEMP_WORKS
 use base64::Engine;
 use chrono::Utc;
 use rusqlite::types::{Value as Sql, ValueRef};
-use rusqlite::{params_from_iter, Connection};
+use rusqlite::{params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Read, Seek, Write};
 use uuid::Uuid;
 
@@ -91,8 +91,25 @@ impl Default for ExportOptions {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ImportSummary {
+    /// The new workspace, or the workspace that was merged into.
     pub workspace: Workspace,
+    /// Rows read from the file.
     pub rows: u64,
+    pub merged: bool,
+    /// Rows left out because the workspace already had them (merge only).
+    pub skipped: u64,
+    /// Documents (Replay tabs, Flows, profiles, Intruder setup) the workspace already had and kept.
+    pub kept_documents: Vec<String>,
+}
+
+/// State shared by the rows of one import.
+struct Ctx<'a> {
+    /// The existing workspace being merged into, if any.
+    merge_target: Option<&'a str>,
+    remap: HashMap<String, String>,
+    /// Ids (as in the file) of parents skipped as duplicates, so their children are skipped too.
+    skipped_ids: HashSet<String>,
+    skipped_rows: u64,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -238,6 +255,17 @@ fn redact(value: &mut Value) {
     }
 }
 
+/// Masks sensitive values in a JSON text (such as stored headers); other text is returned unchanged.
+pub fn redact_json_text(text: &str) -> String {
+    match serde_json::from_str::<Value>(text) {
+        Ok(mut doc) => {
+            redact(&mut doc);
+            doc.to_string()
+        }
+        Err(_) => text.to_string(),
+    }
+}
+
 /// Replaces string values that equal a remapped id.
 fn remap_ids(value: &mut Value, map: &HashMap<String, String>) {
     match value {
@@ -250,6 +278,17 @@ fn remap_ids(value: &mut Value, map: &HashMap<String, String>) {
         Value::Object(members) => members.values_mut().for_each(|v| remap_ids(v, map)),
         _ => {}
     }
+}
+
+/// The id a row gets when merged into `target` but its own id is taken by another workspace. Derived
+/// from both, so merging the same file again finds the row it added before and skips it.
+fn derived_id(target: &str, id: &str) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, format!("{target}\0{id}").as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest.as_ref()[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes).to_string()
 }
 
 fn zip_options() -> zip::write::SimpleFileOptions {
@@ -367,6 +406,26 @@ impl TrafficStorage {
     /// Creates a new workspace from a `.slurp` archive. Nothing is visible until the whole file has
     /// been imported, and a failed import removes what it already wrote.
     pub fn import_workspace<R: Read + Seek>(&self, source: R) -> Result<ImportSummary, ArchiveError> {
+        self.import_archive(source, None, None)
+    }
+
+    /// Merges a `.slurp` archive into an existing workspace. Rows the workspace already has (same id)
+    /// are left alone, the file's rows are added, and documents the workspace already has are kept.
+    /// The file is first staged invisibly, then moved into the workspace in one transaction, so a
+    /// bad file changes nothing. `profiles_ok` checks the file's authentication profiles (JSON text)
+    /// before anything is moved.
+    pub fn import_into_workspace<R: Read + Seek>(&self, source: R, target: &str, profiles_ok: &dyn Fn(&str) -> bool) -> Result<ImportSummary, ArchiveError> {
+        if target == TEMP_WORKSPACE_ID {
+            return Err(invalid("a temporary session cannot be merged into"));
+        }
+        let exists = self.lock_db()?.prepare("SELECT 1 FROM workspaces WHERE id=?1")?.exists([target])?;
+        if !exists {
+            return Err(ArchiveError::NotFound);
+        }
+        self.import_archive(source, Some(target), Some(profiles_ok))
+    }
+
+    fn import_archive<R: Read + Seek>(&self, source: R, merge_target: Option<&str>, profiles_ok: Option<&dyn Fn(&str) -> bool>) -> Result<ImportSummary, ArchiveError> {
         let mut archive = zip::ZipArchive::new(source)?;
         let manifest: Manifest = {
             let entry = archive.by_name("manifest.json").map_err(|_| invalid("manifest.json is missing"))?;
@@ -383,34 +442,93 @@ impl TrafficStorage {
         if manifest.format_version == 0 || manifest.format_version > FORMAT_VERSION {
             return Err(invalid(format!("this file uses format version {}; this Slurp supports up to {FORMAT_VERSION}. Update Slurp to import it", manifest.format_version)));
         }
-        let name = self.free_workspace_name(&manifest.workspace.name)?;
-        let workspace = Uuid::new_v4().to_string();
-        let mut remap: HashMap<String, String> = HashMap::new();
+        let name = match merge_target {
+            Some(_) => String::new(),
+            None => self.free_workspace_name(&manifest.workspace.name)?,
+        };
+        // Rows are written under this id, which is not a workspace until the import succeeds.
+        let staging = Uuid::new_v4().to_string();
+        let mut ctx = Ctx { merge_target, remap: HashMap::new(), skipped_ids: HashSet::new(), skipped_rows: 0 };
         let mut budget = MAX_TOTAL;
         let mut rows = 0u64;
+        let mut kept_documents = Vec::new();
         let result = (|| -> Result<(), ArchiveError> {
             for spec in TABLES {
                 let Some(expected) = manifest.tables.get(spec.name).copied() else { continue };
                 let entry = archive.by_name(&entry_name(spec.name)).map_err(|_| invalid(format!("{} is missing from the file", entry_name(spec.name))))?;
-                let imported = self.import_table(spec, &workspace, entry, &mut remap, &mut budget)?;
+                let imported = self.import_table(spec, &staging, entry, &mut ctx, &mut budget)?;
                 if imported != expected {
                     return Err(invalid(format!("{} is incomplete or corrupted", spec.name)));
                 }
                 rows += imported;
             }
-            let created_at = Utc::now();
-            let db = self.lock_db()?;
-            db.execute("INSERT INTO workspaces (id, name, created_at) VALUES (?1, ?2, ?3)", rusqlite::params![workspace, name, created_at.to_rfc3339()])?;
+            match merge_target {
+                None => {
+                    let created_at = Utc::now();
+                    let db = self.lock_db()?;
+                    db.execute("INSERT INTO workspaces (id, name, created_at) VALUES (?1, ?2, ?3)", rusqlite::params![staging, name, created_at.to_rfc3339()])?;
+                }
+                Some(target) => {
+                    if let Some(check) = profiles_ok {
+                        let staged: Option<String> = self.lock_db()?.query_row("SELECT data FROM auth_profiles WHERE workspace_id=?1", [&staging], |r| r.get(0)).optional()?;
+                        if staged.is_some_and(|doc| !check(&doc)) {
+                            return Err(invalid("the file contains invalid authentication profiles"));
+                        }
+                    }
+                    kept_documents = self.move_staged(&staging, target)?
+                }
+            }
             Ok(())
         })();
         if let Err(error) = result {
-            // The workspace row was never written, so this only removes the partial data.
-            let _ = self.delete_workspace(&workspace);
+            // The staging id was never a workspace, so this only removes the partial data.
+            let _ = self.delete_workspace(&staging);
             return Err(error);
         }
         self.notify_workspaces_changed();
-        let request_count = self.lock_db()?.query_row("SELECT COUNT(*) FROM traffic WHERE workspace_id=?1", [&workspace], |r| r.get(0))?;
-        Ok(ImportSummary { workspace: Workspace { id: workspace, name, created_at: Utc::now(), request_count, active: false }, rows })
+        let id = merge_target.map(str::to_string).unwrap_or(staging);
+        let (name, created_at, request_count) = {
+            let db = self.lock_db()?;
+            let (name, created_at): (String, String) = db.query_row("SELECT name, created_at FROM workspaces WHERE id=?1", [&id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            let count: u64 = db.query_row("SELECT COUNT(*) FROM traffic WHERE workspace_id=?1", [&id], |r| r.get(0))?;
+            (name, created_at, count)
+        };
+        let active = matches!(self.target(), crate::storage::Target::Workspace(ref current) if *current == id);
+        let created_at = created_at.parse().unwrap_or_else(|_| Utc::now());
+        Ok(ImportSummary {
+            workspace: Workspace { id, name, created_at, request_count, active },
+            rows,
+            merged: merge_target.is_some(),
+            skipped: ctx.skipped_rows,
+            kept_documents,
+        })
+    }
+
+    /// Re-key the staged rows to `target` in one transaction. A document the target already has wins,
+    /// and runs that belong to a discarded document are dropped with it.
+    fn move_staged(&self, staging: &str, target: &str) -> Result<Vec<String>, ArchiveError> {
+        let db = self.lock_db()?;
+        let tx = db.unchecked_transaction()?;
+        let mut kept: Vec<String> = Vec::new();
+        for spec in TABLES.iter().filter(|s| s.scope == Scope::Direct) {
+            let discard = if spec.keys.is_empty() {
+                let present = tx.prepare(&format!("SELECT 1 FROM {} WHERE workspace_id=?1", spec.name))?.exists([target])?;
+                let staged = tx.prepare(&format!("SELECT 1 FROM {} WHERE workspace_id=?1", spec.name))?.exists([staging])?;
+                if present && staged {
+                    kept.push(spec.name.to_string());
+                }
+                present
+            } else {
+                (spec.name == "replay_runs" && kept.iter().any(|k| k == "replay_tabs")) || (spec.name == "flow_runs" && kept.iter().any(|k| k == "flow_documents"))
+            };
+            if discard {
+                tx.execute(&format!("DELETE FROM {} WHERE workspace_id=?1", spec.name), [staging])?;
+            } else {
+                tx.execute(&format!("UPDATE {} SET workspace_id=?1 WHERE workspace_id=?2", spec.name), [target, staging])?;
+            }
+        }
+        tx.commit()?;
+        Ok(kept)
     }
 
     fn free_workspace_name(&self, wanted: &str) -> Result<String, ArchiveError> {
@@ -431,7 +549,7 @@ impl TrafficStorage {
         Err(invalid("could not find a free workspace name"))
     }
 
-    fn import_table<R: Read>(&self, spec: &Spec, workspace: &str, entry: R, remap: &mut HashMap<String, String>, budget: &mut u64) -> Result<u64, ArchiveError> {
+    fn import_table<R: Read>(&self, spec: &Spec, workspace: &str, entry: R, ctx: &mut Ctx<'_>, budget: &mut u64) -> Result<u64, ArchiveError> {
         let mut reader = std::io::BufReader::new(entry);
         let mut pending: Vec<Map<String, Value>> = Vec::new();
         let mut pending_bytes = 0usize;
@@ -458,21 +576,24 @@ impl TrafficStorage {
             pending.push(row);
             total += 1;
             if pending.len() >= BATCH_ROWS || pending_bytes >= BATCH_BYTES {
-                self.write_batch(spec, workspace, std::mem::take(&mut pending), remap)?;
+                self.write_batch(spec, workspace, std::mem::take(&mut pending), ctx)?;
                 pending_bytes = 0;
             }
         }
         if !pending.is_empty() {
-            self.write_batch(spec, workspace, pending, remap)?;
+            self.write_batch(spec, workspace, pending, ctx)?;
         }
         Ok(total)
     }
 
-    fn write_batch(&self, spec: &Spec, workspace: &str, rows: Vec<Map<String, Value>>, remap: &mut HashMap<String, String>) -> Result<(), ArchiveError> {
+    fn write_batch(&self, spec: &Spec, workspace: &str, rows: Vec<Map<String, Value>>, ctx: &mut Ctx<'_>) -> Result<(), ArchiveError> {
         let db = self.lock_db()?;
         let tx = db.unchecked_transaction()?;
         for mut row in rows {
-            self.prepare_row(&tx, spec, &mut row, remap)?;
+            if !self.prepare_row(&tx, spec, &mut row, ctx)? {
+                ctx.skipped_rows += 1;
+                continue;
+            }
             insert_row(&tx, spec, workspace, &row)?;
         }
         tx.commit()?;
@@ -480,19 +601,63 @@ impl TrafficStorage {
     }
 
     /// Validates JSON columns and applies id remapping so imported rows never collide with
-    /// (or overwrite) rows that already exist.
-    fn prepare_row(&self, conn: &Connection, spec: &Spec, row: &mut Map<String, Value>, remap: &mut HashMap<String, String>) -> Result<(), ArchiveError> {
+    /// (or overwrite) rows that already exist. Returns false for a row to leave out: when merging,
+    /// one the workspace already has, or a child of such a row.
+    fn prepare_row(&self, conn: &Connection, spec: &Spec, row: &mut Map<String, Value>, ctx: &mut Ctx<'_>) -> Result<bool, ArchiveError> {
+        let text_of = |row: &Map<String, Value>, column: &str| row.get(column).and_then(Value::as_str).map(str::to_string);
+        if ctx.merge_target.is_some() {
+            let parent = match spec.name {
+                "websocket_frames" => text_of(row, "connection_id"),
+                "websocket_requests" => text_of(row, "id"),
+                "intruder_payloads" => text_of(row, "source_id"),
+                "intruder_results" => text_of(row, "run_id"),
+                _ => None,
+            };
+            if parent.is_some_and(|id| ctx.skipped_ids.contains(&id)) {
+                return Ok(false);
+            }
+        }
         if GLOBAL_ID_TABLES.contains(&spec.name) {
             let id = row.get("id").and_then(Value::as_str).ok_or_else(|| invalid(format!("{} row without an id", spec.name)))?.to_string();
-            if conn.prepare(&format!("SELECT 1 FROM {} WHERE id=?1", spec.name))?.exists([&id])? {
-                let fresh = remap.entry(id).or_insert_with(|| Uuid::new_v4().to_string()).clone();
+            if let Some(target) = ctx.merge_target {
+                let in_target = |id: &str| -> Result<bool, ArchiveError> { Ok(conn.prepare(&format!("SELECT 1 FROM {} WHERE id=?1 AND workspace_id=?2", spec.name))?.exists([id, target])?) };
+                let mut skip = in_target(&id)?;
+                if !skip && conn.prepare(&format!("SELECT 1 FROM {} WHERE id=?1", spec.name))?.exists([&id])? {
+                    let derived = derived_id(target, &id);
+                    skip = in_target(&derived)?;
+                    // Rows that refer to this one follow it even when it is already there.
+                    ctx.remap.insert(id.clone(), derived.clone());
+                    if !skip {
+                        row.insert("id".into(), Value::String(derived));
+                    }
+                }
+                if skip {
+                    if spec.name == "websocket_connections" {
+                        ctx.skipped_ids.insert(id);
+                    }
+                    return Ok(false);
+                }
+            } else if conn.prepare(&format!("SELECT 1 FROM {} WHERE id=?1", spec.name))?.exists([&id])? {
+                let fresh = ctx.remap.entry(id).or_insert_with(|| Uuid::new_v4().to_string()).clone();
                 row.insert("id".into(), Value::String(fresh));
             }
         } else if matches!(spec.name, "scan_runs" | "websocket_requests") || spec.scope == Scope::Frames {
             let column = if spec.scope == Scope::Frames { "connection_id" } else { "id" };
             if let Some(Value::String(id)) = row.get_mut(column) {
-                if let Some(new) = remap.get(id.as_str()) {
+                if let Some(new) = ctx.remap.get(id.as_str()) {
                     *id = new.clone();
+                }
+            }
+        }
+        if let Some(target) = ctx.merge_target {
+            if matches!(spec.name, "scan_runs" | "matrix_runs" | "flow_runs" | "intruder_sources" | "intruder_runs") {
+                if let Some(id) = text_of(row, "id") {
+                    if conn.prepare(&format!("SELECT 1 FROM {} WHERE workspace_id=?1 AND id=?2", spec.name))?.exists([target, id.as_str()])? {
+                        if matches!(spec.name, "intruder_sources" | "intruder_runs") {
+                            ctx.skipped_ids.insert(id);
+                        }
+                        return Ok(false);
+                    }
                 }
             }
         }
@@ -502,15 +667,15 @@ impl TrafficStorage {
             if text.is_empty() {
                 continue; // e.g. headers of a request that never got a response
             }
-            if remap.is_empty() {
+            if ctx.remap.is_empty() {
                 serde_json::from_str::<Value>(text).map_err(|_| invalid(format!("{}.{column} is not valid JSON", spec.name)))?;
             } else {
                 let mut doc: Value = serde_json::from_str(text).map_err(|_| invalid(format!("{}.{column} is not valid JSON", spec.name)))?;
-                remap_ids(&mut doc, remap);
+                remap_ids(&mut doc, &ctx.remap);
                 *text = doc.to_string();
             }
         }
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -640,5 +805,95 @@ mod tests {
         // Invalid JSON in a JSON column.
         let bad = make(base(1, json!({"replay_runs": 1})), Some(("data/replay_runs.ndjson", "{\"id\":\"r1\",\"tab_id\":1,\"timestamp\":\"t\",\"data\":\"{oops\"}\n")));
         assert!(s.import_workspace(Cursor::new(bad)).is_err());
+    }
+
+    fn count(s: &TrafficStorage, sql: &str) -> i64 {
+        s.lock_db().unwrap().query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn merging_an_export_back_into_its_workspace_changes_nothing() {
+        let (s, _dir) = storage();
+        let w = s.create_workspace("Work").unwrap();
+        s.set_active_workspace(&w.id).unwrap();
+        let (a, b) = (entry("https://example.com/a"), entry("https://example.com/b"));
+        s.insert(&a).unwrap();
+        s.insert(&b).unwrap();
+        s.put_replay_tabs(&w.id, "{\"tabs\":[],\"variables\":{}}").unwrap();
+        s.add_replay_run(&w.id, 1, json!({"request": {"url": "https://example.com/a"}})).unwrap();
+        s.put_scan_run(&w.id, &a.id, &json!({"entry": a.id})).unwrap();
+        let bytes = export(&s, &w.id, ExportOptions::default());
+
+        let before = (count(&s, "SELECT COUNT(*) FROM traffic"), count(&s, "SELECT COUNT(*) FROM replay_runs"), count(&s, "SELECT COUNT(*) FROM scan_runs"));
+        let merged = s.import_into_workspace(Cursor::new(bytes), &w.id, &|_| true).unwrap();
+        assert!(merged.merged);
+        assert_eq!(merged.workspace.id, w.id);
+        assert_eq!(merged.skipped, 4, "two requests, one replay run, one scan run were already there");
+        assert_eq!(merged.kept_documents, vec!["replay_tabs".to_string()]);
+        assert_eq!((count(&s, "SELECT COUNT(*) FROM traffic"), count(&s, "SELECT COUNT(*) FROM replay_runs"), count(&s, "SELECT COUNT(*) FROM scan_runs")), before);
+        assert_eq!(count(&s, "SELECT COUNT(*) FROM traffic WHERE workspace_id NOT IN (SELECT id FROM workspaces)"), 0, "nothing stays staged");
+        assert_eq!(s.list_workspaces().unwrap().len(), 2, "no workspace was created");
+    }
+
+    #[test]
+    fn merging_adds_new_rows_keeps_existing_documents_and_follows_remapped_ids() {
+        let (s, _dir) = storage();
+        let source = s.create_workspace("Source").unwrap();
+        s.set_active_workspace(&source.id).unwrap();
+        let (a, b) = (entry("https://example.com/a"), entry("https://example.com/b"));
+        s.insert(&a).unwrap();
+        s.insert(&b).unwrap();
+        s.put_replay_tabs(&source.id, "{\"tabs\":[{\"id\":7}]}").unwrap();
+        s.add_replay_run(&source.id, 7, json!({"note": "from source"})).unwrap();
+        s.put_scan_run(&source.id, &a.id, &json!({"entry": a.id})).unwrap();
+        s.put_auth_profiles(&source.id, 0, "{\"profiles\":[],\"active\":null}").unwrap();
+        let bytes = export(&s, &source.id, ExportOptions::default());
+
+        let target = s.create_workspace("Target").unwrap();
+        s.set_active_workspace(&target.id).unwrap();
+        let own = entry("https://example.com/own");
+        s.insert(&own).unwrap();
+        s.put_replay_tabs(&target.id, "{\"tabs\":[{\"id\":1}]}").unwrap();
+
+        let merged = s.import_into_workspace(Cursor::new(bytes.clone()), &target.id, &|_| true).unwrap();
+        assert_eq!(merged.workspace.request_count, 3, "its own request plus the two imported");
+        assert_eq!(merged.kept_documents, vec!["replay_tabs".to_string()]);
+        assert!(s.get_replay_tabs(&target.id).unwrap().unwrap().contains("\"id\":1"), "the target's Replay tabs win");
+        assert_eq!(count(&s, &format!("SELECT COUNT(*) FROM replay_runs WHERE workspace_id='{}'", target.id)), 0, "runs of the discarded Replay tabs are dropped");
+        // Imported requests got fresh ids (the originals belong to the source workspace) and the scan run follows.
+        let imported = s.list(10, 0, &crate::storage::TrafficFilter { workspace: Some(&target.id), ..Default::default() }).unwrap();
+        assert_eq!(imported.len(), 3);
+        let moved = imported.iter().find(|e| e.url == a.url && e.id != a.id).expect("remapped copy");
+        assert_eq!(s.get_scan_run(&target.id, &moved.id).unwrap().unwrap()["entry"], moved.id.as_str());
+        assert!(s.get_auth_profiles(&target.id).unwrap().1.contains("profiles"), "profiles the target lacked are imported");
+        // The source is untouched.
+        assert_eq!(count(&s, &format!("SELECT COUNT(*) FROM traffic WHERE workspace_id='{}'", source.id)), 2);
+        // Merging the same file again finds what it added before: nothing is duplicated.
+        let again = s.import_into_workspace(Cursor::new(bytes), &target.id, &|_| true).unwrap();
+        assert_eq!(again.workspace.request_count, 3);
+        assert!(again.skipped >= 3, "two requests and the scan run are recognized: {}", again.skipped);
+        assert_eq!(count(&s, &format!("SELECT COUNT(*) FROM scan_runs WHERE workspace_id='{}'", target.id)), 1);
+    }
+
+    #[test]
+    fn a_failed_or_misdirected_merge_leaves_the_target_unchanged() {
+        let (s, _dir) = storage();
+        let w = s.create_workspace("Work").unwrap();
+        s.set_active_workspace(&w.id).unwrap();
+        s.insert(&entry("https://example.com/a")).unwrap();
+        let before = count(&s, "SELECT COUNT(*) FROM traffic");
+        let bytes = export(&s, &w.id, ExportOptions::default());
+        assert!(matches!(s.import_into_workspace(Cursor::new(bytes.clone()), "missing", &|_| true), Err(ArchiveError::NotFound)));
+        assert!(matches!(s.import_into_workspace(Cursor::new(bytes), TEMP_WORKSPACE_ID, &|_| true), Err(ArchiveError::Invalid(_))));
+        // A file whose manifest does not match its data fails after staging; nothing reaches the target.
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        zip.start_file("manifest.json", zip_options()).unwrap();
+        zip.write_all(json!({"magic": MAGIC, "format_version": 1, "app_version": "x", "exported_at": "", "workspace": {"name": "W", "created_at": ""}, "options": {"profiles": true, "intruder": true, "redacted": false}, "tables": {"replay_runs": 2}}).to_string().as_bytes()).unwrap();
+        zip.start_file("data/replay_runs.ndjson", zip_options()).unwrap();
+        zip.write_all(b"{\"id\":\"r1\",\"tab_id\":1,\"timestamp\":\"t\",\"data\":\"{}\"}\n").unwrap();
+        let bad = zip.finish().unwrap().into_inner();
+        assert!(s.import_into_workspace(Cursor::new(bad), &w.id, &|_| true).is_err());
+        assert_eq!(count(&s, "SELECT COUNT(*) FROM traffic"), before);
+        assert_eq!(count(&s, "SELECT COUNT(*) FROM replay_runs"), 0);
     }
 }

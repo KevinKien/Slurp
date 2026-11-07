@@ -22,6 +22,8 @@ pub struct Snapshot {
     resources: Vec<ScriptResource>,
     #[serde(default)]
     interaction: Option<Interaction>,
+    #[serde(default)]
+    prototype_property: Option<String>,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -53,6 +55,7 @@ struct Observation {
     sink_traces: Vec<SinkTrace>,
     requested_scripts: Vec<String>,
     interactions: Vec<String>,
+    prototype_polluted: bool,
 }
 fn executable() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("SLURP_BROWSER_PATH") {
@@ -82,6 +85,14 @@ fn validate(snapshot: &Snapshot) -> Result<(), String> {
             || i.selector.is_some() != i.value.is_some()
     }) {
         return Err("Invalid browser interaction".into());
+    }
+    if let Some(property) = &snapshot.prototype_property {
+        if property.is_empty()
+            || property.len() > 64
+            || !property.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return Err("Invalid prototype-pollution property".into());
+        }
     }
     let url = reqwest::Url::parse(&snapshot.url).map_err(|_| "Invalid browser URL")?;
     super::http_target::validate(&url)?;
@@ -542,6 +553,18 @@ async fn inspect(snapshot: Snapshot) -> Result<Observation, String> {
         while let Ok(event) = tokio::time::timeout_at(finish, cdp.next()).await {
             event?;
         }
+        if let Some(property) = snapshot.prototype_property.as_deref() {
+            if let Some(context) = cdp.main_context {
+                let evaluation = cdp.call("Runtime.evaluate", json!({
+                    "expression": format!("(() => {{ try {{ return ({{}})['{property}'] === '1'; }} catch (e) {{ return false; }} }})()"),
+                    "returnByValue": true,
+                    "contextId": context,
+                })).await?;
+                cdp.observation.prototype_polluted = evaluation["result"]["value"]
+                    .as_bool()
+                    .unwrap_or(false);
+            }
+        }
         if let Some(interaction) = snapshot.interaction {
             let evaluation = cdp.call("Runtime.evaluate", json!({
                 "expression": interaction_script(&interaction), "returnByValue":true,
@@ -600,6 +623,7 @@ mod tests {
             marker: "slurpBrowserTest123456".into(),
             resources: Vec::new(),
             interaction: None,
+            prototype_property: None,
         }
     }
     #[test]
@@ -614,6 +638,11 @@ mod tests {
         s.marker = "slurpBrowserTest123456".into();
         s.headers.insert("x-test".into(), "a\r\nb".into());
         assert!(validate(&s).is_err());
+        let mut s = snapshot("ok");
+        s.prototype_property = Some("bad property".into());
+        assert!(validate(&s).is_err());
+        s.prototype_property = Some("slurp_ok".into());
+        assert!(validate(&s).is_ok());
     }
     #[tokio::test]
     #[ignore = "requires installed Chrome/Chromium and permission to launch its sandbox"]

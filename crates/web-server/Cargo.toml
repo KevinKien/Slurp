@@ -29,6 +29,7 @@ webpki-roots = "1"
 regex-automata = "0.4"
 
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
+flate2 = "1"
 
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }

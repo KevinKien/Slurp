@@ -7,6 +7,8 @@ use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+mod scan;
+
 const SERVER_NAME: &str = "slurp";
 const DEFAULT_PROTOCOL: &str = "2025-06-18";
 const SUPPORTED_PROTOCOLS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -127,7 +129,7 @@ pub async fn handle_message(backend: &Backend, msg: Value) -> Option<Value> {
                 "protocolVersion": version,
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION")},
-                "instructions": "Inspect HTTP traffic captured by the Slurp proxy. Start with search_history or list_traffic, then get_traffic for headers and bodies. Use list_replay/create_replay/edit_replay/rename_replay/send_replay to manage saved workspace Replay tabs."
+                "instructions": "Inspect HTTP traffic captured by the Slurp proxy. Start with search_history or list_traffic, then get_traffic for headers and bodies. Use scan_passive to inspect a captured response and scan_active to run bounded injection checks against the captured request target; both save a scan run to the workspace. Use list_replay/create_replay/edit_replay/rename_replay/send_replay to manage saved workspace Replay tabs."
             })
         }
         "ping" => json!({}),
@@ -198,6 +200,28 @@ fn tool_definitions() -> Value {
     search["name"] = json!("search_history");
     search["description"] = json!("Search HTTP History by URL/header keyword, host, method, status and workspace; supports pagination. IDs returned are internal traffic IDs, not display row numbers.");
     tools_array.push(search);
+    tools_array.push(json!({
+        "name": "scan_passive",
+        "description": "Run passive checks on a captured response in a saved workspace: security-headers, cookie-flags and error-disclosure. Sends no requests and stores a scan run that the Scan Dashboard shows.",
+        "inputSchema": {"type": "object", "properties": {
+            "traffic_id": {"type": "string", "description": "Entry id from list_traffic or search_history"},
+            "workspace": {"type": "string", "description": "Saved workspace name or id"},
+            "checks": {"type": "array", "items": {"type": "string"}, "description": "Optional subset: security-headers, cookie-flags, error-disclosure"}
+        }, "required": ["traffic_id", "workspace"]},
+        "annotations": {"readOnlyHint": false}
+    }));
+    tools_array.push(json!({
+        "name": "scan_active",
+        "description": "Run bounded active checks against the captured request target: command-injection, path-traversal, file-inclusion and oauth-redirect (redirect_uri strictness/bypass, state/nonce, form_post injection, callback fingerprint, ID-token email_verified). Sends a fresh baseline, repeated payload probes, a same-value missing control and a restore (about 20-35 requests) with no request delay, so only use it when the user explicitly asked for active scanning and the target is authorized. May change remote state; the scan run is stored in the workspace.",
+        "inputSchema": {"type": "object", "properties": {
+            "traffic_id": {"type": "string", "description": "Entry id from list_traffic or search_history"},
+            "workspace": {"type": "string", "description": "Saved workspace name or id"},
+            "checks": {"type": "array", "items": {"type": "string"}, "description": "Optional subset: command-injection, path-traversal, file-inclusion, oauth-redirect"},
+            "parameter": {"type": "string", "description": "Query parameter name, or body.<field> for a form/JSON string field. Defaults to the first query, form or JSON field."},
+            "max_requests": {"type": "integer", "minimum": 10, "maximum": 80, "description": "Probe budget (default 40)"}
+        }, "required": ["traffic_id", "workspace"]},
+        "annotations": {"readOnlyHint": false, "destructiveHint": true, "openWorldHint": true}
+    }));
     for (name, description, required, properties, readonly) in [
         ("list_replay", "List saved Replay tabs and their editable requests in a saved workspace.", vec!["workspace"], json!({}), true),
         ("create_replay", "Create a Replay tab, optionally copying a history request by traffic_id. request fields override copied values. Does not send a request.", vec!["workspace"], json!({"traffic_id":{"type":"string"},"name":{"type":"string"},"request":{"type":"object","properties":{"method":{"type":"string"},"url":{"type":"string"},"headers":{"type":"object","additionalProperties":{"type":"string"}},"body":{"type":"string"}}}}), false),
@@ -267,6 +291,53 @@ async fn call_tool(backend: &Backend, name: &str, args: &Value) -> Result<String
                 }
             };
             Ok(serde_json::to_string_pretty(&result)?)
+        }
+        "scan_passive" | "scan_active" => {
+            let workspace = workspace_arg(args).ok_or_else(|| anyhow!("workspace is required"))?;
+            let workspace = backend.resolve_workspace(workspace).await?;
+            if workspace == "temporary" {
+                return Err(anyhow!("Scan tools require a saved workspace"));
+            }
+            let traffic_id = args.get("traffic_id").and_then(Value::as_str).filter(|v| !v.is_empty())
+                .ok_or_else(|| anyhow!("missing required argument: traffic_id"))?;
+            if !traffic_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                return Err(anyhow!("invalid traffic_id"));
+            }
+            let entry = backend.get(&format!("/api/traffic/{traffic_id}"), &[]).await?;
+            let checks: Vec<String> = args
+                .get("checks")
+                .and_then(Value::as_array)
+                .map(|values| values.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                .unwrap_or_default();
+            let active = name == "scan_active";
+            let run_id = format!(
+                "mcp-{}-{}",
+                if active { "active" } else { "passive" },
+                chrono::Utc::now().timestamp_millis()
+            );
+            let run = if active {
+                let parameter = args.get("parameter").and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty());
+                let max_requests = args.get("max_requests").and_then(Value::as_u64).unwrap_or(40).clamp(10, 80) as usize;
+                scan::run_active(&run_id, &entry, &checks, parameter, max_requests, backend).await?
+            } else {
+                scan::run_passive(&run_id, &entry, &checks)?
+            };
+            backend.write(reqwest::Method::PUT, &format!("/api/workspaces/{workspace}/scan-runs/{run_id}"), &run).await?;
+            let findings: Vec<Value> = run["findings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|finding| json!({
+                    "id": finding["id"], "checkId": finding["checkId"], "title": finding["title"],
+                    "severity": finding["severity"], "confidence": finding["confidence"],
+                    "summary": finding["summary"], "excerpts": finding["excerpts"]
+                }))
+                .collect();
+            Ok(serde_json::to_string_pretty(&json!({
+                "saved": run_id, "workspace": workspace, "mode": run["plan"]["mode"],
+                "sent": run["sent"], "checks": run["checks"], "findings": findings,
+                "open": "Scan Dashboard shows this run and its evidence."
+            }))?)
         }
         "get_stats" => {
             let mut q: Vec<(&str, String)> = Vec::new();
@@ -367,7 +438,7 @@ mod tests {
     #[tokio::test]
     async fn lists_tools_and_rejects_unknown_method() {
         let r = handle_message(&backend(), json!({"jsonrpc":"2.0","id":1,"method":"tools/list"})).await.unwrap();
-        assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 11);
+        assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 13);
         let r = handle_message(&backend(), json!({"jsonrpc":"2.0","id":2,"method":"nope"})).await.unwrap();
         assert_eq!(r["error"]["code"], -32601);
     }
@@ -416,6 +487,94 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn scan_tools_save_server_validated_runs() {
+        use axum::{extract::Query, routing::{get, post, put}, Router};
+        use std::collections::HashMap;
+        let storage = proxy_core::TrafficStorage::new(":memory:", 1024).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let entry = proxy_core::TrafficEntry::new_request(
+            "GET",
+            &format!("{base}/vuln?q=test"),
+            "127.0.0.1",
+            "/vuln",
+            "http",
+            "{}",
+            vec![],
+            None,
+        );
+        let mut entry = entry;
+        entry.status_code = 200;
+        entry.response_headers = r#"{"content-type":["text/plain"]}"#.into();
+        entry.response_body = b"ok".to_vec();
+        entry.response_size = 2;
+        storage.insert_in_workspace(&entry, "default").unwrap();
+        let app = Router::new()
+            .route(
+                "/vuln",
+                get(|Query(params): Query<HashMap<String, String>>| async move {
+                    let value = params.get("q").cloned().unwrap_or_default();
+                    if value.contains("id") {
+                        "uid=0(root) gid=0(root)".to_string()
+                    } else {
+                        "ok".to_string()
+                    }
+                }),
+            )
+            .route("/api/workspaces", get(web_server::api::list_workspaces))
+            .route("/api/traffic/:id", get(web_server::api::get_traffic))
+            .route("/api/replay/send", post(web_server::http_sender::send))
+            .route(
+                "/api/workspaces/:id/scan-runs/:run",
+                put(web_server::scan::put_run).get(web_server::scan::get_run),
+            )
+            .with_state(storage.clone());
+        let backend = Backend::new(&base);
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let passive: Value = serde_json::from_str(
+            &call_tool(
+                &backend,
+                "scan_passive",
+                &json!({"workspace": "Default", "traffic_id": entry.id}),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(passive["mode"], "passive");
+        assert!(passive["findings"].as_array().unwrap().len() >= 1);
+
+        let active: Value = serde_json::from_str(
+            &call_tool(
+                &backend,
+                "scan_active",
+                &json!({
+                    "workspace": "Default",
+                    "traffic_id": entry.id,
+                    "checks": ["command-injection"],
+                    "parameter": "q",
+                    "max_requests": 40
+                }),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(active["mode"], "active");
+        assert_eq!(active["findings"].as_array().unwrap().len(), 4);
+        assert_eq!(active["findings"][0]["checkId"], "command-injection");
+
+        let saved = active["saved"].as_str().unwrap();
+        let run = backend
+            .get(&format!("/api/workspaces/default/scan-runs/{saved}"), &[])
+            .await
+            .unwrap();
+        assert_eq!(run["status"], "completed");
+        assert_eq!(run["origin"], "mcp");
+        server.abort();
+    }
     #[test]
     fn body_is_truncated_and_binary_detected() {
         let long: Vec<u8> = vec![b'a'; 10];

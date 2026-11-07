@@ -190,7 +190,11 @@ impl CertificateAuthority {
         params.distinguished_name = dn;
 
         // Subject Alternative Names (critical for modern browsers)
-        params.subject_alt_names = vec![SanType::DnsName(domain.try_into()?)];
+        // A client that connects by IP address validates against an IP SAN, not a DNS one.
+        params.subject_alt_names = vec![match domain.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
+            Ok(ip) => SanType::IpAddress(ip),
+            Err(_) => SanType::DnsName(domain.try_into()?),
+        }];
 
         // Not a CA
         params.is_ca = IsCa::NoCa;

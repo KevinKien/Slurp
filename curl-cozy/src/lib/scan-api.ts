@@ -7,6 +7,7 @@ export async function validateBrowserSnapshot(input: {
   marker: string;
   resources?: import("./scan/types").BrowserResource[];
   interaction?: import("./scan/types").BrowserInteraction;
+  prototypeProperty?: string;
 }): Promise<Omit<import("./scan/types").BrowserObservation, "marker" | "url">> {
   const response = await apiFetch<
     | { ok: true; observation: Omit<import("./scan/types").BrowserObservation, "marker" | "url"> }

@@ -12,6 +12,11 @@ pub(crate) struct Change {
 pub struct ProxyControl(pub(crate) mpsc::Sender<Change>);
 
 impl ProxyControl {
+    /// For a server that runs no proxy: every request reports the listener as unavailable.
+    pub fn disabled() -> Self {
+        let (sender, _) = mpsc::channel(1);
+        Self(sender)
+    }
     pub async fn address(&self) -> Result<SocketAddr, String> { self.request(None).await }
     pub async fn set_address(&self, address: SocketAddr) -> Result<SocketAddr, String> {
         if address.port() == 0 { return Err("Port must be between 1 and 65535".into()); }

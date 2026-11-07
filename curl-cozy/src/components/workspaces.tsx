@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
+import { CaptureClients } from '@/components/capture-clients';
 import { ExportWorkspaceDialog, ImportWorkspaceButton } from '@/components/workspace-archive';
 import { ArrowUpRight, Check, Download, Folder, Layers, Pencil, Plus, Radio, Search, Trash2, TriangleAlert, X } from 'lucide-react';
 import { toast } from 'sonner';
@@ -374,6 +375,7 @@ export function WorkspacesView() {
               </li>
             )}
           </ul>
+          <CaptureClients workspaces={workspaces} />
         </>
       )}
     </>

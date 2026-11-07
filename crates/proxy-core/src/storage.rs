@@ -275,12 +275,12 @@ impl TrafficFilter<'_> {
     }
 }
 
-const ENTRY_COLUMNS: &str = "id, timestamp, method, url, host, path, scheme,
+pub(crate) const ENTRY_COLUMNS: &str = "id, timestamp, method, url, host, path, scheme,
     request_headers, request_body, request_content_type,
     status_code, response_headers, response_body, response_content_type,
     duration_ms, request_size, response_size, error, workspace_id, source, bookmarked, notes";
 
-fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrafficEntry> {
+pub(crate) fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrafficEntry> {
     Ok(TrafficEntry {
         id: row.get(0)?,
         timestamp: row
@@ -484,6 +484,15 @@ impl TrafficStorage {
                 workspace_id TEXT PRIMARY KEY,
                 data TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            );
+            -- Remote capture clients: each has a token (stored as a hash) bound to one workspace.
+            CREATE TABLE IF NOT EXISTS capture_clients (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                workspace_id TEXT NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                last_seen_at TEXT
             );",
         )?;
 
@@ -920,6 +929,7 @@ impl TrafficStorage {
             db.execute("DELETE FROM matrix_runs WHERE workspace_id = ?1", params![id])?;
             db.execute("DELETE FROM flow_documents WHERE workspace_id = ?1", params![id])?;
             db.execute("DELETE FROM flow_runs WHERE workspace_id = ?1", params![id])?;
+            db.execute("DELETE FROM capture_clients WHERE workspace_id = ?1", params![id])?;
             if db.execute("DELETE FROM workspaces WHERE id = ?1", params![id])? == 0 {
                 return Err(WorkspaceError::NotFound);
             }

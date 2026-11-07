@@ -184,6 +184,47 @@ export const graphqlIntrospection: ScanCheck = {
     );
   },
 };
+export const graphqlFieldSuggestion: ScanCheck = {
+  id: "graphql-field-suggestion",
+  name: "GraphQL field suggestions (introspection disabled)",
+  active: true,
+  perParameter: false,
+  async run(ctx) {
+    const field = `slurp_${ctx.nonce().replace(/[^a-zA-Z0-9]/g, "")}`;
+    const request = graphRequest(ctx, `query SlurpSuggestion { ${field} }`);
+    if (!request)
+      return result(
+        "A captured GraphQL GET query, JSON POST or application/graphql POST is required.",
+        true,
+      );
+    const control = graphRequest(ctx, `query SlurpSuggestionControl { __typename }`)!;
+    const a = await ctx.probe(request, "GraphQL field suggestion probe");
+    const b = await ctx.probe(request, "GraphQL field suggestion repeat");
+    const negative = await ctx.probe(control, "GraphQL known-field control");
+    if (![a, b, negative].every(ok))
+      return result("GraphQL field-suggestion evidence incomplete.", true);
+    const message = (x: Exchange) => {
+      const payload = json(x);
+      const first = Array.isArray(payload?.errors) ? payload.errors[0] : undefined;
+      return typeof first?.message === "string" ? first.message : "";
+    };
+    const suggested = (text: string) => /Did you mean|Cannot query field|Unknown field|Field .* not found/i.test(text);
+    if (
+      suggested(message(a)) &&
+      suggested(message(b)) &&
+      !suggested(message(negative)) &&
+      !message(negative).includes(field)
+    )
+      return observation(
+        "GraphQL field suggestions enabled",
+        "Two unknown-field probes returned a suggestion-style error while a known-field control did not. Suggestions can reveal schema fields even when introspection is disabled; this is information disclosure, not an authorization bypass.",
+        [a, b, negative],
+        [`Error: ${message(a).slice(0, 200)}`],
+        "info",
+      );
+    return result("No repeated field-suggestion error observed.");
+  },
+};
 export const graphqlBatch: ScanCheck = {
   id: "graphql-batching",
   name: "GraphQL batch operation policy",
@@ -195,13 +236,15 @@ export const graphqlBatch: ScanCheck = {
     const batch = graphRequest(ctx, query, true),
       single = graphRequest(ctx, query);
     if (!batch || !single) return result("GraphQL JSON POST is required for batch checks.", true);
+    const findings: ReturnType<typeof observation>["findings"] = [];
+    let incomplete = false;
     const a = await ctx.probe(single, "GraphQL single operation control");
     const b = await ctx.probe(batch, "GraphQL two-operation batch");
     const c = await ctx.probe(batch, "GraphQL batch repeat");
     const typename = json(a)?.data?.[marker];
     if (
-      typeof typename !== "string" ||
-      ![b, c].every((x) => {
+      typeof typename === "string" &&
+      [b, c].every((x) => {
         const v = json(x);
         return (
           Array.isArray(v) &&
@@ -210,14 +253,57 @@ export const graphqlBatch: ScanCheck = {
         );
       })
     )
-      return result("Two-operation batch execution not reproduced.", ![a, b, c].every(ok));
-    return observation(
-      "GraphQL accepts multiple operations in one HTTP request",
-      "A two-operation read-only batch executed twice and matched the single-operation control. This reports batching capability; rate-limit bypass and denial of service were not tested.",
-      [a, b, c],
-      ["Two __typename operations per batch; no depth or load testing"],
-      "info",
+      findings.push(
+        ...observation(
+          "GraphQL accepts multiple operations in one HTTP request",
+          "A two-operation read-only batch executed twice and matched the single-operation control. This reports batching capability; rate-limit bypass and denial of service were not tested.",
+          [a, b, c],
+          ["Two __typename operations per batch; no depth or load testing"],
+          "info",
+        ).findings,
+      );
+    else incomplete = ![a, b, c].every(ok);
+    const aliasCount = 20;
+    const aliases = Array.from({ length: aliasCount }, (_, index) => `a${index}: __typename`).join(
+      " ",
     );
+    const aliasRequest = graphRequest(ctx, `query SlurpAliases { ${aliases} }`);
+    if (aliasRequest) {
+      const d = await ctx.probe(aliasRequest, "GraphQL 20-alias operation");
+      const e = await ctx.probe(aliasRequest, "GraphQL 20-alias repeat");
+      const data = json(d)?.data;
+      const counts =
+        data && typeof data === "object" && !Array.isArray(data)
+          ? Object.keys(data).filter((key) => /^a\d+$/.test(key)).length
+          : 0;
+      const complete =
+        counts === aliasCount &&
+        Object.values(data as Record<string, unknown>).every((v) => typeof v === "string");
+      const stable =
+        JSON.stringify(json(d)?.data) === JSON.stringify(json(e)?.data) &&
+        JSON.stringify(json(d)?.errors) === JSON.stringify(json(e)?.errors);
+      if (complete && stable && !json(d)?.errors)
+        findings.push(
+          ...observation(
+            "GraphQL executes many aliased fields in one operation",
+            "A single read-only operation carrying 20 __typename aliases returned 20 results twice. Aliasing is standard GraphQL, but it multiplies per-request work and can bypass throttling that counts only HTTP requests. No credential brute force, depth or load test was performed.",
+            [d, e],
+            [`${aliasCount} aliases in one operation`],
+            "info",
+          ).findings,
+        );
+      else incomplete = incomplete || !(ok(d) && ok(e));
+    }
+    return {
+      findings,
+      message: "GraphQL batch and alias controls completed; rate-limit bypass was not exercised.",
+      inconclusive: incomplete && !findings.length,
+    };
   },
 };
-export const tokenGraphqlChecks = [jwtSignature, graphqlIntrospection, graphqlBatch];
+export const tokenGraphqlChecks = [
+  jwtSignature,
+  graphqlIntrospection,
+  graphqlFieldSuggestion,
+  graphqlBatch,
+];

@@ -21,7 +21,7 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Semaphore, OwnedSemaphorePermit};
 use std::{pin::Pin, task::{Context as TaskContext, Poll}};
@@ -54,10 +54,11 @@ impl Default for ProxyConfig {
 
 /// What every connection handler needs.
 #[derive(Clone)]
-struct Shared {
+pub(crate) struct Shared {
     storage: Arc<TrafficStorage>,
     intercept: Arc<Intercept>,
-    upstream_tls: Arc<rustls::ClientConfig>,
+    /// `None` follows the live trust store; tests pin a fixed config.
+    upstream_tls: Option<Arc<rustls::ClientConfig>>,
     connections: Arc<Semaphore>,
     requests: Arc<Semaphore>,
     body_limit: usize,
@@ -81,8 +82,13 @@ impl ProxyServer {
         Self {
             config: config.clone(),
             ca,
-            shared: Shared { storage, intercept, upstream_tls: client_tls_config(), connections:Arc::new(Semaphore::new(64)),requests:Arc::new(Semaphore::new(8)),body_limit:config.max_body_size.min(10*1024*1024),management_port:config.management_addr.map(|a|a.port()) },
+            shared: Shared { storage, intercept, upstream_tls: None, connections:Arc::new(Semaphore::new(64)),requests:Arc::new(Semaphore::new(8)),body_limit:config.max_body_size.min(10*1024*1024),management_port:config.management_addr.map(|a|a.port()) },
         }
+    }
+
+    /// Reverse proxies (fixed-upstream listeners) that capture into this server's storage.
+    pub fn reverse_proxies(&self, config_path: std::path::PathBuf) -> Arc<crate::reverse::ReverseProxies> {
+        crate::reverse::ReverseProxies::new(self.ca.clone(), self.shared.clone(), config_path)
     }
 
     /// Switch listeners without cancelling existing HTTP connections or CONNECT tunnels.
@@ -151,6 +157,11 @@ impl AsyncWrite for ClientStream {
 /// If it's CONNECT, we do MITM. Otherwise, we forward as HTTP.
 async fn handle_client(stream: TcpStream, ca: Arc<CertificateAuthority>, shared: Shared) -> Result<()> {
     let permit=shared.connections.clone().try_acquire_owned().map_err(|_|anyhow::anyhow!("Proxy connection capacity reached"))?;
+    // SOCKS5 starts with 0x05; HTTP starts with a letter, so both share the proxy port.
+    let mut first=[0u8;1];
+    if let Ok(Ok(1))=tokio::time::timeout(Duration::from_secs(10),stream.peek(&mut first)).await {
+        if first[0]==5 { return handle_socks(ClientStream{stream,_permit:permit},ca,shared).await; }
+    }
     let io = TokioIo::new(ClientStream{stream,_permit:permit});
 
     http1::Builder::new()
@@ -176,6 +187,144 @@ async fn handle_client(stream: TcpStream, ca: Arc<CertificateAuthority>, shared:
         .await
         .map_err(|e| anyhow::anyhow!("HTTP serve error: {}", e))?;
 
+    Ok(())
+}
+
+/// One connection to a reverse-proxy listener: every request goes to the rule's fixed upstream.
+pub(crate) async fn handle_reverse(stream: TcpStream, route: crate::reverse::Route, ca: Arc<CertificateAuthority>, shared: Shared) -> Result<()> {
+    let permit = shared.connections.clone().try_acquire_owned().map_err(|_| anyhow::anyhow!("Proxy connection capacity reached"))?;
+    let io = ClientStream { stream, _permit: permit };
+    let target = Target { https: route.https, host: route.host.clone(), port: route.port };
+    if !route.tls {
+        return serve_fixed_target(io, target, route.rewrite_host, shared, false).await;
+    }
+    let handshake = tokio_rustls::LazyConfigAcceptor::new(rustls::server::Acceptor::default(), io);
+    let start = tokio::time::timeout(Duration::from_secs(10), handshake).await.context("Client TLS handshake timed out")??;
+    let name = start.client_hello().server_name().map(str::to_ascii_lowercase).unwrap_or_else(|| route.fallback_name.clone());
+    let config = ca.get_server_config(&name).with_context(|| format!("Failed to get cert for {name}"))?;
+    let tls = tokio::time::timeout(Duration::from_secs(10), start.into_stream(config)).await.context("Client TLS handshake timed out")??;
+    let h2 = tls.get_ref().1.alpn_protocol() == Some(b"h2".as_slice());
+    serve_fixed_target(tls, target, route.rewrite_host, shared, h2).await
+}
+
+/// Serve requests read from `io` to one destination, optionally presenting the destination's own
+/// host as `Host` (what the upstream expects, rather than the address the client used).
+async fn serve_fixed_target<IO>(io: IO, target: Target, rewrite_host: bool, shared: Shared, h2: bool) -> Result<()>
+where
+    IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let service = service_fn(move |mut req: Request<Incoming>| {
+        let target = target.clone();
+        let shared = shared.clone();
+        async move {
+            if rewrite_host {
+                if let Ok(value) = HeaderValue::from_str(&target.authority()) {
+                    req.headers_mut().insert(hyper::header::HOST, value);
+                }
+            }
+            let path_and_query = req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/").to_string();
+            proxy_request(req, target, path_and_query, &shared).await
+        }
+    });
+    let io = TokioIo::new(io);
+    if h2 {
+        hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+            .timer(hyper_util::rt::TokioTimer::new())
+            .max_concurrent_streams(8)
+            .serve_connection(io, service)
+            .await
+            .map_err(|e| anyhow::anyhow!("HTTP/2 serve error: {}", e))
+    } else {
+        http1::Builder::new()
+            .timer(hyper_util::rt::TokioTimer::new())
+            .header_read_timeout(Duration::from_secs(10))
+            .preserve_header_case(true)
+            .title_case_headers(true)
+            .serve_connection(io, service)
+            .with_upgrades()
+            .await
+            .map_err(|e| anyhow::anyhow!("HTTP serve error: {}", e))
+    }
+}
+
+/// How long a SOCKS client gets to send its first bytes. Protocols where the server speaks
+/// first (SSH, SMTP, databases) send nothing, and are relayed once this passes.
+const SOCKS_SNIFF: Duration = Duration::from_secs(1);
+
+/// A SOCKS5 connection: after the handshake, decrypt TLS, capture plain HTTP, or relay the rest.
+async fn handle_socks(mut io: ClientStream, ca: Arc<CertificateAuthority>, shared: Shared) -> Result<()> {
+    let destination = crate::socks::handshake(&mut io.stream).await?;
+    let deadline = Instant::now() + SOCKS_SNIFF;
+    let mut buffer = vec![0u8; 16384 + 5];
+    let kind = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let seen = match tokio::time::timeout(remaining, io.stream.peek(&mut buffer)).await {
+            Ok(Ok(0)) => return Ok(()),
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => break crate::socks::Kind::Other,
+        };
+        match crate::socks::classify(&buffer[..seen]) {
+            crate::socks::Kind::Incomplete if Instant::now() < deadline => tokio::time::sleep(Duration::from_millis(5)).await,
+            crate::socks::Kind::Incomplete => break crate::socks::Kind::Other,
+            kind => break kind,
+        }
+    };
+    let (host, port) = (destination.host, destination.port);
+    match kind {
+        crate::socks::Kind::Tls(sni) => {
+            // A client that resolved DNS itself sends an address; the name it asked for is in the SNI.
+            let name = sni.filter(|_| destination_is_ip(&host)).unwrap_or(host);
+            info!("🧦 SOCKS5 TLS {}:{}", name, port);
+            handle_https_mitm(io, &name, port, ca, shared).await
+        }
+        crate::socks::Kind::Http => {
+            info!("🧦 SOCKS5 HTTP {}:{}", host, port);
+            serve_plain_http(io, host, port, shared).await
+        }
+        _ => {
+            info!("🧦 SOCKS5 relay {}:{} (not HTTP or TLS, not captured)", host, port);
+            relay(io, &host, port, shared.management_port).await
+        }
+    }
+}
+
+fn destination_is_ip(host: &str) -> bool {
+    host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().is_ok()
+}
+
+/// Serve HTTP/1.1 requests read from `io` (origin-form) to a fixed plain-HTTP destination.
+async fn serve_plain_http<IO>(io: IO, host: String, port: u16, shared: Shared) -> Result<()>
+where
+    IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let service = service_fn(move |req: Request<Incoming>| {
+        let target = Target { https: false, host: host.clone(), port };
+        let shared = shared.clone();
+        async move {
+            let path_and_query = req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/").to_string();
+            proxy_request(req, target, path_and_query, &shared).await
+        }
+    });
+    http1::Builder::new()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(Duration::from_secs(10))
+        .preserve_header_case(true)
+        .title_case_headers(true)
+        .serve_connection(TokioIo::new(io), service)
+        .with_upgrades()
+        .await
+        .map_err(|e| anyhow::anyhow!("HTTP serve error: {}", e))
+}
+
+/// Copy bytes both ways between the client and the destination without looking at them.
+async fn relay(mut io: ClientStream, host: &str, port: u16, management_port: Option<u16>) -> Result<()> {
+    let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host.trim_matches(['[', ']']), port)).await?.collect();
+    forbid_management(&addresses, port, management_port).map_err(|e| anyhow::anyhow!(e))?;
+    let mut upstream = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(addresses.as_slice()))
+        .await
+        .map_err(|_| anyhow::anyhow!("Connection timed out"))??;
+    tokio::io::copy_bidirectional(&mut io, &mut upstream).await?;
     Ok(())
 }
 
@@ -401,7 +550,7 @@ async fn proxy_request(
         upstream_req.headers_mut().insert("connection", HeaderValue::from_static("Upgrade"));
         upstream_req.headers_mut().insert("upgrade", HeaderValue::from_static("websocket"));
     }
-    let mut upstream_res = match tokio::time::timeout(Duration::from_secs(30),send_upstream(&target, upstream_req, shared.upstream_tls.clone(),shared.management_port,websocket)).await.unwrap_or_else(|_|Err("Upstream request timed out".into())) {
+    let mut upstream_res = match tokio::time::timeout(Duration::from_secs(30),send_upstream(&target, upstream_req, shared.upstream_tls.clone().unwrap_or_else(client_tls_config),shared.management_port,websocket)).await.unwrap_or_else(|_|Err("Upstream request timed out".into())) {
         Ok(r) => r,
         Err(e) => {
             record(shared, &target, &request, None, Some(e.clone()), start);
@@ -503,14 +652,20 @@ fn record(
     entry
 }
 
+/// Refuse destinations that would reach Slurp's own management API through the proxy.
+fn forbid_management(addresses:&[SocketAddr],port:u16,management_port:Option<u16>)->Result<(),String>{
+    if management_port==Some(port) {
+        let local:Vec<_>=if_addrs::get_if_addrs().map_err(|e|format!("Cannot validate management destination: {e}"))?.into_iter().map(|i|i.ip().to_canonical()).collect();
+        if addresses.iter().any(|a|a.ip().to_canonical().is_loopback()||local.contains(&a.ip().to_canonical())) {return Err("Proxy forwarding to Slurp management API is forbidden".into());}
+    }
+    Ok(())
+}
+
 /// Connect to the destination (with TLS for https) and send one request.
 /// WebSocket upgrades need HTTP/1.1, so they skip HTTP/2 negotiation (`websocket`).
 async fn send_upstream(target: &Target, req: Request<Full<Bytes>>, tls_config: Arc<rustls::ClientConfig>, management_port:Option<u16>, websocket: bool) -> Result<Response<Incoming>, String> {
     let addresses:Vec<_>=tokio::net::lookup_host((target.host.trim_matches(['[',']']),target.port)).await.map_err(|e|format!("DNS lookup failed: {e}"))?.collect();
-    if management_port==Some(target.port) {
-        let local:Vec<_>=if_addrs::get_if_addrs().map_err(|e|format!("Cannot validate management destination: {e}"))?.into_iter().map(|i|i.ip().to_canonical()).collect();
-        if addresses.iter().any(|a|a.ip().to_canonical().is_loopback()||local.contains(&a.ip().to_canonical())) {return Err("Proxy forwarding to Slurp management API is forbidden".into());}
-    }
+    forbid_management(&addresses,target.port,management_port)?;
     // Connect to the exact addresses checked above; do not perform another DNS lookup.
     let tcp=TcpStream::connect(addresses.as_slice()).await.map_err(|e|format!("Connection failed: {e}"))?;
 
@@ -593,20 +748,9 @@ where
         .map_err(|e| format!("Upstream error: {e}"))
 }
 
-/// TLS settings for talking to real servers, built once. Offers HTTP/2 and HTTP/1.1.
+/// TLS settings for talking to real servers: public roots plus the CAs trusted in Settings.
 fn client_tls_config() -> Arc<rustls::ClientConfig> {
-    static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
-    CONFIG
-        .get_or_init(|| {
-            let mut roots = rustls::RootCertStore::empty();
-            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-            let mut config = rustls::ClientConfig::builder()
-                .with_root_certificates(roots)
-                .with_no_client_auth();
-            config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-            Arc::new(config)
-        })
-        .clone()
+    crate::trust::client_config()
 }
 
 /// Same trust roots as `config`, but HTTP/1.1 only (required for WebSocket upgrades).
@@ -747,7 +891,7 @@ mod websocket_tests {
     async fn exchange(scheme: &str, capture: bool) {
         tokio::time::timeout(std::time::Duration::from_secs(10),async {
             let storage=TrafficStorage::new(":memory:",1024).unwrap();
-            let shared=Shared{storage:storage.clone(),intercept:Intercept::new(storage.clone()),upstream_tls:client_tls_config(),connections:Arc::new(Semaphore::new(64)),requests:Arc::new(Semaphore::new(8)),body_limit:10*1024*1024,management_port:None};
+            let shared=Shared{storage:storage.clone(),intercept:Intercept::new(storage.clone()),upstream_tls:None,connections:Arc::new(Semaphore::new(64)),requests:Arc::new(Semaphore::new(8)),body_limit:10*1024*1024,management_port:None};
             if !capture {shared.intercept.update_scope(crate::ScopeSettings{enabled:true,domains:vec!["other.example.com".into()]}).unwrap();}
             let upstream=TcpListener::bind("127.0.0.1:0").await.unwrap();let target=upstream.local_addr().unwrap();
             let server=tokio::spawn(async move {let (stream,_)=upstream.accept().await.unwrap();let mut ws=tokio_tungstenite::accept_async(stream).await.unwrap();let msg=ws.next().await.unwrap().unwrap();assert_eq!(msg.to_text().unwrap(),"hello");ws.send(tokio_tungstenite::tungstenite::Message::Text("world".into())).await.unwrap();ws.close(None).await.unwrap();});
@@ -785,7 +929,7 @@ mod wss_tests {
             for cert in rustls_pemfile::certs(&mut std::io::Cursor::new(ca.ca_cert_pem())) {roots.add(cert.unwrap()).unwrap();}
             let config=Arc::new(rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth());
             let storage=TrafficStorage::new(":memory:",1024).unwrap();
-            let shared=Shared{storage:storage.clone(),intercept:Intercept::new(storage.clone()),upstream_tls:config.clone(),connections:Arc::new(Semaphore::new(64)),requests:Arc::new(Semaphore::new(8)),body_limit:10*1024*1024,management_port:None};
+            let shared=Shared{storage:storage.clone(),intercept:Intercept::new(storage.clone()),upstream_tls:Some(config.clone()),connections:Arc::new(Semaphore::new(64)),requests:Arc::new(Semaphore::new(8)),body_limit:10*1024*1024,management_port:None};
             let upstream=TcpListener::bind("127.0.0.1:0").await.unwrap();let port=upstream.local_addr().unwrap().port();
             let tls_server=ca.get_server_config("localhost").unwrap();
             let server=tokio::spawn(async move {let (stream,_)=upstream.accept().await.unwrap();let tls=TlsAcceptor::from(tls_server).accept(stream).await.unwrap();let mut ws=tokio_tungstenite::accept_async(tls).await.unwrap();let msg=ws.next().await.unwrap().unwrap();assert_eq!(msg.to_text().unwrap(),"secure hello");ws.send(tokio_tungstenite::tungstenite::Message::Text("secure world".into())).await.unwrap();ws.close(None).await.unwrap();});
@@ -809,7 +953,7 @@ mod resource_tests {
     use tokio::io::{AsyncReadExt,AsyncWriteExt};
     async fn request(body_limit:usize,management_port:Option<u16>,target:SocketAddr,body:&[u8],capacity:usize)->String {
         let storage=TrafficStorage::new(":memory:",1024).unwrap();
-        let shared=Shared{intercept:Intercept::new(storage.clone()),storage,upstream_tls:client_tls_config(),connections:Arc::new(Semaphore::new(2)),requests:Arc::new(Semaphore::new(capacity)),body_limit,management_port};
+        let shared=Shared{intercept:Intercept::new(storage.clone()),storage,upstream_tls:None,connections:Arc::new(Semaphore::new(2)),requests:Arc::new(Semaphore::new(capacity)),body_limit,management_port};
         let directory=tempfile::tempdir().unwrap();let ca=Arc::new(CertificateAuthority::load_or_create(directory.path()).unwrap());
         let listener=TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
         let task=tokio::spawn(async move{let (stream,_)=listener.accept().await.unwrap();let _=handle_client(stream,ca,shared).await;});
@@ -851,7 +995,7 @@ mod http2_tests {
             client_config.alpn_protocols=vec![b"h2".to_vec(),b"http/1.1".to_vec()];
             let config=Arc::new(client_config);
             let storage=TrafficStorage::new(":memory:",1024).unwrap();
-            let shared=Shared{storage:storage.clone(),intercept:Intercept::new(storage.clone()),upstream_tls:config.clone(),connections:Arc::new(Semaphore::new(64)),requests:Arc::new(Semaphore::new(8)),body_limit:10*1024*1024,management_port:None};
+            let shared=Shared{storage:storage.clone(),intercept:Intercept::new(storage.clone()),upstream_tls:Some(config.clone()),connections:Arc::new(Semaphore::new(64)),requests:Arc::new(Semaphore::new(8)),body_limit:10*1024*1024,management_port:None};
 
             let upstream=TcpListener::bind("127.0.0.1:0").await.unwrap();let port=upstream.local_addr().unwrap().port();
             let tls_server=ca.get_server_config("localhost").unwrap();
@@ -888,5 +1032,252 @@ mod http2_tests {
             assert!(entries[0].request_headers.to_ascii_lowercase().contains(&format!("localhost:{port}")),"Host recorded from :authority");
             drop(server);
         }).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod private_ca_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt,AsyncWriteExt};
+    /// An HTTPS upstream signed by a CA that is not a public root: refused until that CA is trusted.
+    #[tokio::test]
+    async fn upstream_with_a_private_ca_works_only_after_the_ca_is_trusted() {
+        let _guard=crate::trust::TEST_SERIAL.lock().unwrap_or_else(|e|e.into_inner());
+        let data=tempfile::tempdir().unwrap();crate::trust::init(data.path().join("trusted-cas")).unwrap();
+        let upstream_ca_dir=tempfile::tempdir().unwrap();let upstream_ca=CertificateAuthority::load_or_create(upstream_ca_dir.path()).unwrap();
+        let mut server_config=(*upstream_ca.get_server_config("localhost").unwrap()).clone();server_config.alpn_protocols=vec![b"http/1.1".to_vec()];
+        let acceptor=TlsAcceptor::from(Arc::new(server_config));
+        let upstream=TcpListener::bind("127.0.0.1:0").await.unwrap();let port=upstream.local_addr().unwrap().port();
+        tokio::spawn(async move{loop{let Ok((stream,_))=upstream.accept().await else{break};let acceptor=acceptor.clone();tokio::spawn(async move{
+            let Ok(mut tls)=acceptor.accept(stream).await else{return};let mut buffer=[0u8;4096];let _=tls.read(&mut buffer).await;
+            let _=tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello").await;let _=tls.shutdown().await;});}});
+        let proxy_ca_dir=tempfile::tempdir().unwrap();let proxy_ca=Arc::new(CertificateAuthority::load_or_create(proxy_ca_dir.path()).unwrap());
+        let fetch=|ca:Arc<CertificateAuthority>|async move{
+            let storage=TrafficStorage::new(":memory:",1024).unwrap();
+            let shared=Shared{intercept:Intercept::new(storage.clone()),storage,upstream_tls:None,connections:Arc::new(Semaphore::new(4)),requests:Arc::new(Semaphore::new(4)),body_limit:1024*1024,management_port:None};
+            let listener=TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
+            let task=tokio::spawn(async move{let (stream,_)=listener.accept().await.unwrap();let _=handle_client(stream,ca,shared).await;});
+            let mut client=TcpStream::connect(address).await.unwrap();
+            client.write_all(format!("GET https://localhost:{port}/hello HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+            let mut bytes=Vec::new();tokio::time::timeout(Duration::from_secs(10),client.read_to_end(&mut bytes)).await.unwrap().unwrap();task.await.unwrap();String::from_utf8_lossy(&bytes).into_owned()
+        };
+        let before=fetch(proxy_ca.clone()).await;assert!(before.starts_with("HTTP/1.1 502"),"{before}");
+        crate::trust::add_pem("private-upstream",upstream_ca.ca_cert_pem().as_ref()).unwrap();
+        let after=fetch(proxy_ca.clone()).await;assert!(after.starts_with("HTTP/1.1 200")&&after.ends_with("hello"),"{after}");
+        assert!(crate::trust::remove("private-upstream").unwrap());
+        let removed=fetch(proxy_ca).await;assert!(removed.starts_with("HTTP/1.1 502"),"{removed}");
+    }
+}
+
+#[cfg(test)]
+mod socks_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt,AsyncWriteExt};
+
+    fn shared(storage:Arc<TrafficStorage>,upstream_tls:Option<Arc<rustls::ClientConfig>>,management_port:Option<u16>)->Shared {
+        Shared{intercept:Intercept::new(storage.clone()),storage,upstream_tls,connections:Arc::new(Semaphore::new(8)),requests:Arc::new(Semaphore::new(8)),body_limit:1024*1024,management_port}
+    }
+    /// A proxy that serves exactly one connection; returns its address.
+    async fn proxy(shared:Shared,ca:Arc<CertificateAuthority>)->(SocketAddr,tokio::task::JoinHandle<()>) {
+        let listener=TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
+        (address,tokio::spawn(async move{let (stream,_)=listener.accept().await.unwrap();let _=handle_client(stream,ca,shared).await;}))
+    }
+    fn new_ca()->(Arc<CertificateAuthority>,tempfile::TempDir) {let dir=tempfile::tempdir().unwrap();(Arc::new(CertificateAuthority::load_or_create(dir.path()).unwrap()),dir)}
+    /// SOCKS5 greeting and CONNECT; returns the connected client and the reply code.
+    async fn socks(proxy:SocketAddr,atyp:u8,address:&[u8],port:u16,command:u8)->(TcpStream,u8) {
+        let mut client=TcpStream::connect(proxy).await.unwrap();
+        client.write_all(&[5,1,0]).await.unwrap();let mut method=[0u8;2];client.read_exact(&mut method).await.unwrap();assert_eq!(method,[5,0]);
+        let mut request=vec![5,command,0,atyp];request.extend_from_slice(address);request.extend_from_slice(&port.to_be_bytes());client.write_all(&request).await.unwrap();
+        let mut answer=[0u8;10];client.read_exact(&mut answer).await.unwrap();assert_eq!(answer[0],5);(client,answer[1])
+    }
+    fn domain(name:&str)->Vec<u8> {let mut v=vec![name.len() as u8];v.extend_from_slice(name.as_bytes());v}
+    async fn http_upstream()->(u16,tokio::task::JoinHandle<()>) {
+        let listener=TcpListener::bind("127.0.0.1:0").await.unwrap();let port=listener.local_addr().unwrap().port();
+        (port,tokio::spawn(async move{let (mut s,_)=listener.accept().await.unwrap();let mut b=[0u8;4096];let _=s.read(&mut b).await;let _=s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").await;}))
+    }
+    fn urls(storage:&TrafficStorage)->Vec<String> {storage.list(10,0,&TrafficFilter{workspace:Some(crate::TEMP_WORKSPACE_ID),..Default::default()}).unwrap().into_iter().map(|e|e.url).collect()}
+
+    #[tokio::test]
+    async fn socks5_plain_http_is_captured() {
+        tokio::time::timeout(Duration::from_secs(10),async{
+            let (port,upstream)=http_upstream().await;let storage=TrafficStorage::new(":memory:",1024).unwrap();let (ca,_d)=new_ca();
+            let (address,task)=proxy(shared(storage.clone(),None,None),ca).await;
+            let (mut client,code)=socks(address,3,&domain("localhost"),port,1).await;assert_eq!(code,0);
+            client.write_all(format!("GET /x HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+            let mut bytes=Vec::new();client.read_to_end(&mut bytes).await.unwrap();let text=String::from_utf8_lossy(&bytes).into_owned();
+            assert!(text.starts_with("HTTP/1.1 200")&&text.ends_with("ok"),"{text}");upstream.await.unwrap();let _=task.await;
+            assert_eq!(urls(&storage),vec![format!("http://localhost:{port}/x")]);
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn socks5_tls_to_an_ip_address_is_decrypted_using_the_sni_name() {
+        tokio::time::timeout(Duration::from_secs(10),async{
+            let (ca,_d)=new_ca();let mut roots=rustls::RootCertStore::empty();
+            for cert in rustls_pemfile::certs(&mut std::io::Cursor::new(ca.ca_cert_pem())) {roots.add(cert.unwrap()).unwrap();}
+            let mut config=rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();config.alpn_protocols=vec![b"http/1.1".to_vec()];let config=Arc::new(config);
+            let mut server=(*ca.get_server_config("localhost").unwrap()).clone();server.alpn_protocols=vec![b"http/1.1".to_vec()];let acceptor=TlsAcceptor::from(Arc::new(server));
+            let upstream=TcpListener::bind("127.0.0.1:0").await.unwrap();let port=upstream.local_addr().unwrap().port();
+            let server=tokio::spawn(async move{let (s,_)=upstream.accept().await.unwrap();let mut tls=acceptor.accept(s).await.unwrap();let mut b=[0u8;4096];let _=tls.read(&mut b).await;let _=tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nsecure").await;let _=tls.shutdown().await;});
+            let storage=TrafficStorage::new(":memory:",1024).unwrap();
+            let (address,task)=proxy(shared(storage.clone(),Some(config.clone()),None),ca).await;
+            // The client resolved DNS itself, so SOCKS carries 127.0.0.1; TLS still asks for "localhost".
+            let (client,code)=socks(address,1,&[127,0,0,1],port,1).await;assert_eq!(code,0);
+            let mut tls=tokio_rustls::TlsConnector::from(config).connect(rustls::pki_types::ServerName::try_from("localhost").unwrap(),client).await.unwrap();
+            tls.write_all(format!("GET /secure HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+            let mut bytes=Vec::new();let _=tls.read_to_end(&mut bytes).await;let text=String::from_utf8_lossy(&bytes).into_owned();
+            assert!(text.starts_with("HTTP/1.1 200")&&text.ends_with("secure"),"{text}");server.await.unwrap();drop(tls);let _=task.await;
+            assert_eq!(urls(&storage),vec![format!("https://localhost:{port}/secure")]);
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn socks5_rejects_unsupported_methods_and_commands() {
+        let storage=TrafficStorage::new(":memory:",1024).unwrap();let (ca,_d)=new_ca();
+        let (address,task)=proxy(shared(storage.clone(),None,None),ca.clone()).await;
+        let mut client=TcpStream::connect(address).await.unwrap();client.write_all(&[5,1,2]).await.unwrap();let mut answer=[0u8;2];client.read_exact(&mut answer).await.unwrap();assert_eq!(answer,[5,0xFF]);let _=task.await;
+        // UDP ASSOCIATE (3) and BIND (2) are refused with "command not supported".
+        for command in [3u8,2] {
+            let (address,task)=proxy(shared(storage.clone(),None,None),ca.clone()).await;
+            let (_client,code)=socks(address,1,&[127,0,0,1],9,command).await;assert_eq!(code,7);let _=task.await;
+        }
+        // An unknown address type is refused with "address type not supported".
+        let (address,task)=proxy(shared(storage.clone(),None,None),ca).await;
+        let mut client=TcpStream::connect(address).await.unwrap();client.write_all(&[5,1,0]).await.unwrap();let mut method=[0u8;2];client.read_exact(&mut method).await.unwrap();
+        client.write_all(&[5,1,0,9,0,0]).await.unwrap();let mut answer=[0u8;10];client.read_exact(&mut answer).await.unwrap();assert_eq!(answer[1],8);let _=task.await;
+        assert!(urls(&storage).is_empty());
+    }
+
+    #[tokio::test]
+    async fn socks5_relays_other_protocols_unchanged_including_server_first_ones() {
+        tokio::time::timeout(Duration::from_secs(15),async{
+            let storage=TrafficStorage::new(":memory:",1024).unwrap();let (ca,_d)=new_ca();
+            // Server speaks first (like SSH or SMTP): nothing arrives from the client at first.
+            let banner=TcpListener::bind("127.0.0.1:0").await.unwrap();let banner_port=banner.local_addr().unwrap().port();
+            tokio::spawn(async move{let (mut s,_)=banner.accept().await.unwrap();let _=s.write_all(b"HELLO\r\n").await;let mut b=[0u8;16];let _=s.read(&mut b).await;});
+            let (address,task)=proxy(shared(storage.clone(),None,None),ca.clone()).await;
+            let (mut client,code)=socks(address,3,&domain("localhost"),banner_port,1).await;assert_eq!(code,0);
+            let mut hello=[0u8;7];client.read_exact(&mut hello).await.unwrap();assert_eq!(&hello,b"HELLO\r\n");drop(client);let _=task.await;
+            // Client speaks first with binary data: echoed back byte for byte.
+            let echo=TcpListener::bind("127.0.0.1:0").await.unwrap();let echo_port=echo.local_addr().unwrap().port();
+            tokio::spawn(async move{let (mut s,_)=echo.accept().await.unwrap();let mut b=[0u8;5];s.read_exact(&mut b).await.unwrap();s.write_all(&b).await.unwrap();});
+            let (address,task)=proxy(shared(storage.clone(),None,None),ca).await;
+            let (mut client,_)=socks(address,1,&[127,0,0,1],echo_port,1).await;
+            client.write_all(&[0,1,2,3,4]).await.unwrap();let mut back=[0u8;5];client.read_exact(&mut back).await.unwrap();assert_eq!(back,[0,1,2,3,4]);drop(client);let _=task.await;
+            assert!(urls(&storage).is_empty(),"relayed traffic is not captured");
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn socks5_cannot_be_used_to_reach_the_management_api() {
+        tokio::time::timeout(Duration::from_secs(10),async{
+            let management=TcpListener::bind("127.0.0.1:0").await.unwrap();let port=management.local_addr().unwrap().port();
+            let storage=TrafficStorage::new(":memory:",1024).unwrap();let (ca,_d)=new_ca();
+            let (address,task)=proxy(shared(storage,None,Some(port)),ca).await;
+            let (mut client,code)=socks(address,1,&[127,0,0,1],port,1).await;assert_eq!(code,0);
+            client.write_all(&[0,1,2,3,4]).await.unwrap();
+            let mut rest=Vec::new();let _=client.read_to_end(&mut rest).await;assert!(rest.is_empty());let _=task.await;
+            assert!(tokio::time::timeout(Duration::from_millis(100),management.accept()).await.is_err(),"the proxy must not connect to the management port");
+        }).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod reverse_tests {
+    use super::*;
+    use crate::reverse::{NewRule, ReverseError, ReverseProxies};
+    use tokio::io::{AsyncReadExt,AsyncWriteExt};
+
+    fn free_port()->u16 {let l=std::net::TcpListener::bind("127.0.0.1:0").unwrap();l.local_addr().unwrap().port()}
+    fn setup(upstream_tls:Option<Arc<rustls::ClientConfig>>)->(Arc<ReverseProxies>,Arc<TrafficStorage>,Arc<CertificateAuthority>,tempfile::TempDir) {
+        let dir=tempfile::tempdir().unwrap();let ca=Arc::new(CertificateAuthority::load_or_create(dir.path()).unwrap());
+        let storage=TrafficStorage::new(":memory:",1024).unwrap();
+        let shared=Shared{intercept:Intercept::new(storage.clone()),storage:storage.clone(),upstream_tls,connections:Arc::new(Semaphore::new(16)),requests:Arc::new(Semaphore::new(8)),body_limit:1024*1024,management_port:None};
+        (ReverseProxies::new(ca.clone(),shared,dir.path().join("reverse-proxies.json")),storage,ca,dir)
+    }
+    /// An HTTP upstream that records the raw request it receives and answers 200 "ok".
+    async fn upstream()->(u16,tokio::sync::oneshot::Receiver<String>) {
+        let listener=TcpListener::bind("127.0.0.1:0").await.unwrap();let port=listener.local_addr().unwrap().port();let (tx,rx)=tokio::sync::oneshot::channel();
+        tokio::spawn(async move{let (mut s,_)=listener.accept().await.unwrap();let mut b=vec![0u8;8192];let n=s.read(&mut b).await.unwrap();let _=tx.send(String::from_utf8_lossy(&b[..n]).into_owned());
+            let _=s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").await;});
+        (port,rx)
+    }
+    fn rule(listen:u16,upstream:&str,tls:bool,rewrite_host:bool)->NewRule {NewRule{name:"api".into(),listen:format!("127.0.0.1:{listen}").parse().unwrap(),upstream:upstream.into(),tls,rewrite_host}}
+    fn urls(storage:&TrafficStorage)->Vec<String> {storage.list(10,0,&TrafficFilter{workspace:Some(crate::TEMP_WORKSPACE_ID),..Default::default()}).unwrap().into_iter().map(|e|e.url).collect()}
+    async fn get(port:u16,path:&str)->String {
+        let mut c=TcpStream::connect(("127.0.0.1",port)).await.unwrap();
+        c.write_all(format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+        let mut bytes=Vec::new();tokio::time::timeout(Duration::from_secs(10),c.read_to_end(&mut bytes)).await.unwrap().unwrap();String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    #[tokio::test]
+    async fn requests_reach_the_fixed_upstream_with_its_host_and_are_captured() {
+        tokio::time::timeout(Duration::from_secs(20),async{
+            let (manager,storage,_ca,_d)=setup(None);
+            let (up,seen)=upstream().await;let listen=free_port();
+            manager.add(rule(listen,&format!("http://localhost:{up}"),false,true)).await.unwrap();
+            let response=get(listen,"/p?x=1").await;assert!(response.starts_with("HTTP/1.1 200")&&response.ends_with("ok"),"{response}");
+            let request=seen.await.unwrap();assert!(request.starts_with("GET /p?x=1 HTTP/1.1"),"{request}");assert!(request.to_ascii_lowercase().contains(&format!("host: localhost:{up}")),"{request}");
+            assert_eq!(urls(&storage),vec![format!("http://localhost:{up}/p?x=1")]);
+            // With Host rewriting off, the upstream sees the address the client used.
+            let (up2,seen2)=upstream().await;let listen2=free_port();
+            manager.add(rule(listen2,&format!("http://localhost:{up2}"),false,false)).await.unwrap();
+            get(listen2,"/h").await;let request=seen2.await.unwrap();assert!(request.to_ascii_lowercase().contains(&format!("host: 127.0.0.1:{listen2}")),"{request}");
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_https_listener_serves_a_certificate_from_the_slurp_ca() {
+        tokio::time::timeout(Duration::from_secs(20),async{
+            let (manager,storage,ca,_d)=setup(None);
+            let mut roots=rustls::RootCertStore::empty();for cert in rustls_pemfile::certs(&mut std::io::Cursor::new(ca.ca_cert_pem())) {roots.add(cert.unwrap()).unwrap();}
+            let mut client=rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();client.alpn_protocols=vec![b"http/1.1".to_vec()];
+            let (up,_seen)=upstream().await;let listen=free_port();
+            manager.add(rule(listen,&format!("http://localhost:{up}"),true,true)).await.unwrap();
+            // The client connects by IP address, so there is no SNI: the certificate carries an IP SAN.
+            let stream=TcpStream::connect(("127.0.0.1",listen)).await.unwrap();
+            let mut tls=tokio_rustls::TlsConnector::from(Arc::new(client)).connect(rustls::pki_types::ServerName::try_from("127.0.0.1").unwrap(),stream).await.unwrap();
+            tls.write_all(format!("GET /tls HTTP/1.1\r\nHost: 127.0.0.1:{listen}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+            let mut bytes=Vec::new();let _=tls.read_to_end(&mut bytes).await;let text=String::from_utf8_lossy(&bytes).into_owned();assert!(text.starts_with("HTTP/1.1 200")&&text.ends_with("ok"),"{text}");
+            assert_eq!(urls(&storage),vec![format!("http://localhost:{up}/tls")]);
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rules_are_validated_and_stopped_rules_release_their_port() {
+        let (manager,_storage,_ca,_d)=setup(None);let listen=free_port();
+        for bad in ["not a url","ftp://x","http://","http://u:p@x","http://x/path","http://x/?q=1","http://x:0"] {
+            assert!(matches!(manager.add(rule(free_port(),bad,false,true)).await,Err(ReverseError::Invalid(_))),"{bad}");
+        }
+        assert!(matches!(manager.add(NewRule{name:"".into(),..rule(free_port(),"http://x",false,true)}).await,Err(ReverseError::Invalid(_))));
+        assert!(matches!(manager.add(rule(listen,&format!("http://localhost:{listen}"),false,true)).await,Err(ReverseError::Conflict(_))),"forwarding to itself");
+        let added=manager.add(rule(listen,"http://example.com",false,true)).await.unwrap();
+        assert!(matches!(manager.add(rule(listen,"http://example.org",false,true)).await,Err(ReverseError::Conflict(_))),"address already used by a rule");
+        assert!(matches!(manager.add(rule(free_port(),&format!("http://127.0.0.1:{listen}"),false,true)).await,Err(ReverseError::Conflict(_))),"upstream is another rule's listener");
+        assert_eq!(manager.list().await.len(),1);
+        // A port taken by something else is reported and nothing is saved.
+        let taken=TcpListener::bind("127.0.0.1:0").await.unwrap();let taken_port=taken.local_addr().unwrap().port();
+        assert!(matches!(manager.add(rule(taken_port,"http://example.com",false,true)).await,Err(ReverseError::Conflict(_))));
+        assert_eq!(manager.list().await.len(),1);
+        // Disabling releases the port; enabling takes it again; removing deletes the rule.
+        assert!(manager.list().await[0].running);
+        manager.set_enabled(&added.rule.id,false).await.unwrap();tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!manager.list().await[0].running);drop(TcpListener::bind(("127.0.0.1",listen)).await.unwrap());
+        manager.set_enabled(&added.rule.id,true).await.unwrap();assert!(manager.list().await[0].running);
+        manager.remove(&added.rule.id).await.unwrap();assert!(manager.list().await.is_empty());assert!(matches!(manager.remove(&added.rule.id).await,Err(ReverseError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn rules_survive_a_restart_and_only_enabled_ones_start() {
+        let (manager,_storage,ca,dir)=setup(None);let (on,off)=(free_port(),free_port());
+        manager.add(rule(on,"http://example.com",false,true)).await.unwrap();
+        let second=manager.add(rule(off,"http://example.org",false,true)).await.unwrap();manager.set_enabled(&second.rule.id,false).await.unwrap();
+        drop(manager);tokio::time::sleep(Duration::from_millis(50)).await;
+        let storage=TrafficStorage::new(":memory:",1024).unwrap();
+        let shared=Shared{intercept:Intercept::new(storage.clone()),storage,upstream_tls:None,connections:Arc::new(Semaphore::new(4)),requests:Arc::new(Semaphore::new(4)),body_limit:1024,management_port:None};
+        let again=ReverseProxies::new(ca,shared,dir.path().join("reverse-proxies.json"));
+        assert_eq!(again.list().await.len(),2);assert!(again.list().await.iter().all(|r|!r.running));
+        again.start_all().await;let status=again.list().await;
+        assert!(status.iter().find(|r|r.rule.listen.port()==on).unwrap().running);assert!(!status.iter().find(|r|r.rule.listen.port()==off).unwrap().running);
     }
 }

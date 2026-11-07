@@ -6,6 +6,10 @@ use std::sync::Arc;
 pub struct PublicCaCertificate(pub Arc<[u8]>);
 
 pub async fn download(Extension(certificate): Extension<PublicCaCertificate>) -> Response {
+    // A server without a proxy (`slurp server`) has no CA to offer.
+    if certificate.0.is_empty() {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    }
     (
         [
             (header::CONTENT_TYPE, "application/x-pem-file"),

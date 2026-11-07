@@ -163,7 +163,8 @@ pub fn start(
     tasks.extend(start_header_audit(storage_for_crlf.clone(), intercept_for_crlf.clone(), state.clone(),true));
     tasks.extend(start_cve_audit(storage_for_crlf.clone(), intercept_for_crlf.clone(), state.clone(), "php2shell"));
     tasks.extend(start_cve_audit(storage_for_crlf.clone(), intercept_for_crlf.clone(), state.clone(), "http2shell"));
-    tasks.extend(start_cve_audit(storage_for_crlf, intercept_for_crlf, state.clone(), "react2shell"));
+    tasks.extend(start_cve_audit(storage_for_crlf.clone(), intercept_for_crlf.clone(), state.clone(), "react2shell"));
+    tasks.extend(start_cve_audit(storage_for_crlf, intercept_for_crlf, state.clone(), "oauth-redirect"));
     (state, AuditRuntime(tasks))
 }
 
@@ -172,6 +173,7 @@ fn cve_eligible(check: &str, entry: &TrafficEntry) -> bool {
         "php2shell" => super::php2shell::eligible(entry),
         "http2shell" => super::http2shell::eligible(entry),
         "react2shell" => super::react2shell::eligible(entry),
+        "oauth-redirect" => super::oauth_audit::eligible(entry),
         _ => false,
     }
 }
@@ -180,13 +182,15 @@ fn cve_key(check: &str, request: &Value) -> String {
     match check {
         "php2shell" => super::php2shell::key(request),
         "http2shell" => super::http2shell::key(request),
-        _ => super::react2shell::key(request),
+        "react2shell" => super::react2shell::key(request),
+        _ => super::oauth_audit::key(request),
     }
 }
 
 /// CVE exposure audits keep their own queue and dedup key so one check cannot delay another.
-/// `php2shell` is passive, `http2shell` sends one bounded differential probe and `react2shell`
-/// sends one ordinary RSC navigation; none sends an exploit payload.
+/// `php2shell` is passive, `http2shell` sends one bounded differential probe, `react2shell`
+/// sends one ordinary RSC navigation and `oauth-redirect` audits captured authorize requests;
+/// none sends an exploit payload or uses a captured authorization code.
 fn start_cve_audit(
     storage: Arc<TrafficStorage>,
     intercept: Arc<Intercept>,
@@ -260,7 +264,8 @@ fn start_cve_audit(
             let result = match check {
                 "php2shell" => super::php2shell::audit(&entry, &run_id, &state, &intercept).await,
                 "http2shell" => super::http2shell::audit(&entry, &run_id, &state, &intercept).await,
-                _ => super::react2shell::audit(&entry, &run_id, &state, &intercept).await,
+                "react2shell" => super::react2shell::audit(&entry, &run_id, &state, &intercept).await,
+                _ => super::oauth_audit::audit(&entry, &run_id, &state, &intercept).await,
             };
             if let Some(run) = result {
                 if storage.get(&id).ok().flatten().is_some() {

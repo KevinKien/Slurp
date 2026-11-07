@@ -15,12 +15,17 @@ mod host_audit;
 mod php2shell;
 mod http2shell;
 mod react2shell;
+mod oauth_audit;
 mod js_audit;
 mod secret_rules;
 pub mod security;
 pub mod proxy_settings;
 pub mod flows;
 pub mod workspace_archive;
+pub mod ingest;
+pub mod trust_settings;
+pub mod reverse_settings;
+pub mod capture_client;
 pub mod origin;
 pub mod replay;
 pub mod http_sender;
@@ -111,6 +116,15 @@ pub async fn serve(listener: tokio::net::TcpListener, storage: Arc<TrafficStorag
             axum::routing::patch(api::rename_workspace).delete(api::delete_workspace),
         )
         .route("/api/workspaces/:id/activate", post(api::activate_workspace))
+        .route("/api/settings/upstream-trust", get(trust_settings::get).put(trust_settings::set_system))
+        .route("/api/settings/upstream-trust/cas", post(trust_settings::add))
+        .route("/api/settings/upstream-trust/cas/:name", axum::routing::delete(trust_settings::remove))
+        .route("/api/settings/reverse-proxies", get(reverse_settings::list).post(reverse_settings::add))
+        .route("/api/settings/reverse-proxies/:id", axum::routing::patch(reverse_settings::set_enabled).delete(reverse_settings::remove))
+        .route("/api/ingest/hello", get(ingest::hello))
+        .route("/api/ingest/batch", post(ingest::batch).layer(axum::extract::DefaultBodyLimit::max(96 * 1024 * 1024)))
+        .route("/api/capture-clients", get(ingest::list_clients).post(ingest::create_client))
+        .route("/api/capture-clients/:id", axum::routing::delete(ingest::delete_client))
         .route("/api/workspaces/:id/export", get(workspace_archive::export))
         .route("/api/workspaces/import", post(workspace_archive::import).layer(axum::extract::DefaultBodyLimit::disable()))
         .route("/api/workspaces/:id/replay", get(api::get_replay_tabs).put(api::put_replay_tabs))

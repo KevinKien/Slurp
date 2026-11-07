@@ -15,6 +15,7 @@ export type BrowserValidator = (
   url?: string,
   resources?: import("./types").BrowserResource[],
   interaction?: import("./types").BrowserInteraction,
+  prototypeProperty?: string,
 ) => Promise<BrowserObservation>;
 const html = (x: Exchange) =>
   !!x.response &&

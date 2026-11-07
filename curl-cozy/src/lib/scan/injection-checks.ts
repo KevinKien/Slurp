@@ -1,6 +1,6 @@
 import type { CheckOutput, Exchange, ScanCheck, ScanCheckContext } from "./types";
 import { compareResponses } from "../response-diff";
-import { mutateParameter } from "./parameters";
+import { mutateParameter, parameterValue } from "./parameters";
 import { observation, ok as validExchange, result, text } from "./extended-checks";
 
 const ok = (x: Exchange) => validExchange(x) && text(x).length <= 256000;
@@ -365,6 +365,10 @@ export const xxe: ScanCheck = {
         uri: "file:///C:/Windows/win.ini",
         signature: /\[fonts\][\s\S]{0,4096}\[(?:extensions|mci extensions)\]/i,
       },
+      {
+        uri: "http://example.com/",
+        signature: /Example Domain/i,
+      },
     ];
     for (const candidate of cases) {
       if (ctx.baselines.some((x) => candidate.signature.test(text(x).slice(0, 256000)))) continue;
@@ -396,27 +400,132 @@ export const xxe: ScanCheck = {
         !matches(escaped) &&
         !matches(missing) &&
         [first, second].every((x) => success(x) && matches(x))
-      )
+      ) {
+        const label = candidate.uri.startsWith("http")
+          ? "remote HTTP entity"
+          : "local-file";
         return evidence(
-          "Possible XXE: repeated local-file content signature",
-          "Two external entity probes returned a known local-file signature absent from baselines, escaped-entity, missing-file and restored-original controls. File signatures require contextual review. No network callback, recursive expansion or file write was attempted.",
+          `Possible XXE: repeated ${candidate.uri.startsWith("http") ? "remote" : "local-file"} content signature`,
+          `Two external entity probes returned a known ${label} signature absent from baselines, escaped-entity, missing-file and restored-original controls. File and network signatures require contextual review; no callback, recursive expansion or file write was attempted. Cloud metadata targets are intentionally not requested automatically because the response could contain credentials.`,
           [...ctx.baselines, ...rows],
           [
             `Entity target: ${candidate.uri}`,
-            "Repeated file signature; returned file contents omitted from excerpts",
+            "Repeated file/remote signature; returned content omitted from excerpts",
           ],
           "high",
-          "Disable DTDs and external entity resolution in the XML parser; prohibit file and network resolvers.",
+          "Disable DTDs and external entity resolution in the XML parser; prohibit file and network resolvers, and require IMDSv2 where applicable.",
         );
+      }
     }
     return result(
-      "No controlled local-file signature; blind XXE, remote callbacks and other XML input locations are not assessed.",
+      "No controlled local-file or remote HTTP entity signature; cloud metadata, blind XXE, remote callbacks and other XML input locations are not requested automatically.",
     );
   },
 };
+const BENIGN_UID = /(?:^|\n)uid=\d+\([^)]*\) gid=\d+\(/;
+function commandPayload(ctx: ScanCheckContext) {
+  return parameterValue(ctx.request, ctx.parameter!);
+}
+
+export const commandBypass: ScanCheck = {
+  id: "command-bypass",
+  name: "OS command injection — separator and filter bypass",
+  active: true,
+  perParameter: true,
+  async run(ctx) {
+    if (!ready(ctx)) return result("Stable successful baselines and a selected parameter required.", true);
+    if (ctx.baselines.some((x) => BENIGN_UID.test(text(x))))
+      return result("Baseline already contains command-output signatures.", true);
+    const control = await send(ctx, `slurp_${ctx.nonce().replace(/[^a-zA-Z0-9]/g, "")}`, "Command bypass plain control");
+    if (!success(control) || BENIGN_UID.test(text(control)))
+      return result("Command bypass control failed or contains command output.", true);
+    const payloads = [
+      [";id", "semicolon"],
+      ["|id", "pipe"],
+      ["||id", "OR pipe"],
+      ["&id", "background"],
+      ["&&id", "AND"],
+      ["`id`", "backtick"],
+      ["$(id)", "substitution"],
+      ["\nid", "newline"],
+      ["\nid\n", "padded newline"],
+      ["%0aid", "double-decoded newline"],
+      [";${IFS}id", "IFS"],
+      [";\tid", "tab"],
+      [";i$()d", "split command"],
+      [";i'd'", "quoted split"],
+      [";$IFS$9id", "IFS with positional"],
+      [";echo aWQ=|base64 -d|sh", "base64 pipe"],
+    ] as const;
+    for (const [payload, label] of payloads) {
+      const probe = await send(ctx, payload, `Command bypass ${label}`);
+      const repeat = await send(ctx, payload, `Command bypass ${label} repeat`);
+      if (!success(probe) || !success(repeat))
+        return result("Command bypass probes failed or were blocked.", true);
+      if (BENIGN_UID.test(text(probe)) && BENIGN_UID.test(text(repeat))) {
+        const original = await ctx.probe(ctx.request, "Command bypass original control");
+        if (!restored(ctx, original)) return result("Original response did not restore baseline.", true);
+        return evidence(
+          `Possible OS command injection via ${label} separator/filter bypass`,
+          "A benign `id` payload returned uid/gid output twice while a plain control did not. This indicates shell interpretation despite the separator or filter evasions; only `id` was executed and no file read, callback or data change was performed.",
+          [...ctx.baselines, control, probe, repeat, original],
+          [`Payload: ${payload}`, "uid/gid output reproduced twice"],
+          "high",
+          "Avoid shell interpolation: use argument arrays, allowlist inputs and run commands with least privilege.",
+        );
+      }
+    }
+    return result("No uid/gid command output observed for the supported separator and filter evasions.");
+  },
+};
+
+export const argumentInjection: ScanCheck = {
+  id: "argument-injection",
+  name: "OS argument injection — benign execution flags",
+  active: true,
+  perParameter: true,
+  async run(ctx) {
+    if (!ready(ctx)) return result("Stable successful baselines and a selected parameter required.", true);
+    const original = commandPayload(ctx);
+    if (ctx.baselines.some((x) => BENIGN_UID.test(text(x))))
+      return result("Baseline already contains command-output signatures.", true);
+    const control = await send(ctx, original || "slurp", "Argument plain control");
+    if (!success(control) || BENIGN_UID.test(text(control)))
+      return result("Argument control failed or contains command output.", true);
+    const flags = [
+      ["--upload-pack=id", "git upload-pack"],
+      ["--checkpoint-action=exec=id", "tar checkpoint action"],
+      ["--use-compress-program=id", "tar compress program"],
+      ["ext::id", "git ext remote"],
+    ] as const;
+    for (const [flag, label] of flags) {
+      const payload = original ? `${original} ${flag}` : flag;
+      const probe = await send(ctx, payload, `Argument injection ${label}`);
+      const repeat = await send(ctx, payload, `Argument injection ${label} repeat`);
+      if (!success(probe) || !success(repeat))
+        return result("Argument injection probes failed or were blocked.", true);
+      if (BENIGN_UID.test(text(probe)) && BENIGN_UID.test(text(repeat))) {
+        const restore = await ctx.probe(ctx.request, "Argument injection original control");
+        if (!restored(ctx, restore)) return result("Original response did not restore baseline.", true);
+        return evidence(
+          `Possible argument injection: ${label}`,
+          "A benign execution flag returned uid/gid output twice while the original value did not. This indicates the input reaches a tool argument parser and can introduce new flags; only `id` was executed and no file write, callback or data change was performed.",
+          [...ctx.baselines, control, probe, repeat, restore],
+          [`Payload: ${payload}`, "uid/gid output reproduced twice"],
+          "high",
+          "Pass user input as a single validated argument (or use `--`), reject leading flags and avoid shell command construction.",
+        );
+      }
+    }
+    return result("No uid/gid output observed for the supported argument-injection flags.");
+  },
+};
+
 export const injectionChecks: readonly ScanCheck[] = [
   nosqlInjection,
   commandInjection,
+  commandBypass,
+  argumentInjection,
   codeInjection,
   elInjection,
   ldapInjection,

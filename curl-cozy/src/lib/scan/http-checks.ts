@@ -285,6 +285,40 @@ export const clientIp: ScanCheck = {
   perParameter: false,
   run: (ctx) => deniedAccess(ctx, "ip"),
 };
+function withPath(request: HttpRequest, path: string): HttpRequest {
+  const url = new URL(request.url);
+  url.pathname = path;
+  return { ...structuredClone(request), url: url.href };
+}
+/** Bounded front-end/back-end normalization discrepancies for a selected path. */
+function pathVariants(pathname: string): { label: string; path: string }[] {
+  const parts = pathname.split("/").filter(Boolean);
+  if (!parts.length) return [];
+  const first = parts[0]!;
+  const rest = parts.slice(1).join("/");
+  const base = "/" + parts.join("/");
+  const variants = [
+    { label: "semicolon after first segment", path: `/${first};${rest ? "/" + rest : ""}` },
+    { label: "semicolon slash after first segment", path: `/${first};/${rest}` },
+    { label: "semicolon suffix", path: `${base};` },
+    { label: "parent-segment injection", path: `/${first}/..;${rest ? "/" + rest : "/"}` },
+    { label: "encoded semicolon", path: `/${first}%3b${rest ? "/" + rest : ""}` },
+    { label: "double leading slash", path: `/${base}` },
+    { label: "dot-segment prefix", path: `/./${base.slice(1)}` },
+    { label: "encoded dot segment", path: `/%2e/${base.slice(1)}` },
+    { label: "trailing dot", path: `${base}.` },
+    { label: "trailing slash", path: `${base}/` },
+  ];
+  const seen = new Set([pathname]);
+  return variants
+    .filter((variant) => {
+      if (variant.path === pathname || seen.has(variant.path) || variant.path.length > 2000)
+        return false;
+      seen.add(variant.path);
+      return true;
+    })
+    .slice(0, 8);
+}
 export const urlOverride: ScanCheck = {
   id: "url-override",
   name: "URL override header routing",
@@ -319,7 +353,108 @@ export const urlOverride: ScanCheck = {
           ).findings,
         );
     }
+    // Classic bypass: reach the denied path from an allowed URL whose path is carried in the header.
+    const baseline = ctx.baselines[0]!;
+    if (ok(baseline) && [401, 403].includes(baseline.response!.status)) {
+      const original = new URL(ctx.request.url);
+      const target = original.pathname + original.search;
+      const root = {
+        method: "GET",
+        url: original.origin + "/",
+        headers: { ...ctx.request.headers },
+        body: "",
+      } as HttpRequest;
+      const rootControl = await ctx.probe(root, "Override root control");
+      if (ok(rootControl)) {
+        for (const name of ["X-Original-URL", "X-Rewrite-URL"]) {
+          const probe = await ctx.probe(
+            withHeader(root, name, target),
+            `${name} denied path through root`,
+          );
+          const repeat = await ctx.probe(
+            withHeader(root, name, target),
+            `${name} denied path through root repeat`,
+          );
+          const missing = await ctx.probe(
+            withHeader(root, name, "/slurp-missing-" + ctx.nonce()),
+            `${name} missing path through root`,
+          );
+          const restore = await ctx.probe(ctx.request, "Override denial restore");
+          if (![probe, repeat, missing, restore].every(ok)) continue;
+          if (
+            success(probe) &&
+            same(probe, repeat, ctx) &&
+            !same(probe, rootControl, ctx) &&
+            !same(missing, probe, ctx) &&
+            !success(missing) &&
+            same(restore, baseline, ctx)
+          )
+            findings.push(
+              ...observation(
+                `Denied path reached through ${name} from the allowed root URL`,
+                "Sending the root URL with the denied path in a routing header returned a repeated successful response that differs from both a plain root control and a missing-path control, while the original request stayed denied. This indicates the front-end routed on the header rather than the request URL; confirm that the response contains the protected resource and is not a generic landing page.",
+                [...ctx.baselines, rootControl, probe, repeat, missing, restore],
+                [`Header: ${name}: ${target}`, `Original status: ${baseline.response!.status}`],
+                "medium",
+              ).findings,
+            );
+        }
+      }
+    }
     return { findings, message: "Supported routing-header controls completed." };
+  },
+};
+export const pathConfusion: ScanCheck = {
+  id: "path-confusion",
+  name: "Path normalization / semicolon bypass",
+  active: true,
+  perParameter: false,
+  async run(ctx) {
+    if (!ctx.stable) return result("Stable baselines required.", true);
+    const baseline = ctx.baselines[0]!;
+    if (!ok(baseline)) return result("Baseline response required.", true);
+    if (![401, 403, 404].includes(baseline.response!.status))
+      return result(
+        "A denied or missing baseline (401/403/404) is required for path normalization checks.",
+      );
+    const control = await ctx.probe(
+      withPath(ctx.request, `/${ctx.nonce()}`),
+      "Path variant random control",
+    );
+    if (!ok(control)) return result("Path control request failed.", true);
+    const findings: ReturnType<typeof observation>["findings"] = [];
+    for (const variant of pathVariants(new URL(ctx.request.url).pathname)) {
+      const probe = await ctx.probe(
+        withPath(ctx.request, variant.path),
+        `Path variant: ${variant.label}`,
+      );
+      const repeat = await ctx.probe(
+        withPath(ctx.request, variant.path),
+        `Path variant repeat: ${variant.label}`,
+      );
+      const restore = await ctx.probe(ctx.request, "Path variant original restore");
+      if (![probe, repeat, restore].every(ok)) continue;
+      if (!success(probe) || !same(probe, repeat, ctx)) continue;
+      if (same(probe, control, ctx) || same(probe, baseline, ctx)) continue;
+      if (!same(restore, baseline, ctx)) continue;
+      findings.push(
+        ...observation(
+          `Path normalization variant reached a different response: ${variant.label}`,
+          `The variant path ${variant.path} returned a repeated ${probe.response!.status} response that differs from both the original ${baseline.response!.status} baseline and a random-path control, while the original request restored the denial. Differing front-end and back-end path normalization can expose a restricted route; confirm that the response contains the protected resource and is not a generic catch-all page.`,
+          [...ctx.baselines, control, probe, repeat, restore],
+          [
+            `Variant: ${variant.path}`,
+            `Baseline status: ${baseline.response!.status}`,
+            `Variant status: ${probe.response!.status}`,
+          ],
+          "medium",
+        ).findings,
+      );
+    }
+    return {
+      findings,
+      message: "Bounded path normalization variants completed; CDN or proxy normalization may differ.",
+    };
   },
 };
 export const httpMethods: ScanCheck = {
@@ -390,5 +525,6 @@ export const httpChecks = [
   refererAccess,
   clientIp,
   urlOverride,
+  pathConfusion,
   httpMethods,
 ];

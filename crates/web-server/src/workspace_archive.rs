@@ -107,8 +107,19 @@ pub async fn export(
     Ok(response)
 }
 
-/// `POST /api/workspaces/import` — body is a `.slurp` file; creates a new workspace from it.
-pub async fn import(State(storage): State<Arc<TrafficStorage>>, body: Body) -> Result<Response, Error> {
+#[derive(Debug, Deserialize)]
+pub struct ImportParams {
+    /// Merge into this existing workspace instead of creating a new one.
+    pub merge_into: Option<String>,
+}
+
+fn profiles_valid(text: &str) -> bool {
+    serde_json::from_str::<Value>(text).ok().is_some_and(|doc| crate::security::validate_profiles(&doc).is_ok())
+}
+
+/// `POST /api/workspaces/import` — body is a `.slurp` file. Creates a new workspace from it, or with
+/// `?merge_into=<workspace id>` merges it into that workspace.
+pub async fn import(State(storage): State<Arc<TrafficStorage>>, Query(params): Query<ImportParams>, body: Body) -> Result<Response, Error> {
     let mut file = tokio::fs::File::from_std(tempfile::tempfile().map_err(|e| archive_error(e.into()))?);
     let mut received = 0u64;
     let mut stream = body.into_data_stream();
@@ -125,11 +136,13 @@ pub async fn import(State(storage): State<Arc<TrafficStorage>>, body: Body) -> R
     let summary = tokio::task::spawn_blocking(move || -> Result<proxy_core::ImportSummary, ArchiveError> {
         let mut file = file;
         file.seek(SeekFrom::Start(0))?;
+        if let Some(target) = params.merge_into {
+            return storage.import_into_workspace(file, &target, &profiles_valid);
+        }
         let summary = storage.import_workspace(file)?;
         // Documents saved through the API are validated; imported ones must meet the same bar.
         let (_, profiles) = storage.get_auth_profiles(&summary.workspace.id).map_err(|e| ArchiveError::Other(e.into()))?;
-        let valid = serde_json::from_str::<Value>(&profiles).ok().is_some_and(|doc| crate::security::validate_profiles(&doc).is_ok());
-        if !valid {
+        if !profiles_valid(&profiles) {
             let _ = storage.delete_workspace(&summary.workspace.id);
             return Err(ArchiveError::Invalid("the file contains invalid authentication profiles".into()));
         }

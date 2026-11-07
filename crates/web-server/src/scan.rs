@@ -64,7 +64,7 @@ fn check_id(value: &Value) -> bool {
                 | "js-endpoints"
                 | "js-secrets"
                 | "sql-boolean" | "sql-time" | "header-injection" | "host-header" | "auth-access" | "referer-access" | "client-ip" | "url-override" | "http-methods"
-                | "command-injection" | "code-injection" | "el-injection" | "ldap-injection" | "xpath-injection" | "xml-injection" | "xml-entity" | "xxe" | "xml-injection-body" | "xml-entity-body" | "xxe-body"
+                | "command-injection" | "file-inclusion" | "oauth-redirect" | "code-injection" | "el-injection" | "ldap-injection" | "xpath-injection" | "xml-injection" | "xml-entity" | "xxe" | "xml-injection-body" | "xml-entity-body" | "xxe-body"
                 | "cookie-audit" | "disclosure-audit" | "policy-audit"
                 | "php2shell" | "http2shell" | "react2shell"
                 | "passive-audit" | "sql-injection" | "ssti" | "path-traversal" | "open-redirect"

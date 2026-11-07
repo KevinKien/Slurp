@@ -212,3 +212,51 @@ it("SQL boolean also tests OR predicates for empty numeric parameters and reflec
     "repeated boolean differential",
   );
 });
+it("path normalization variants require a distinct repeated success and restored denial", async () => {
+  const ctx = context(async (r) => {
+    const path = new URL(r.url).pathname;
+    if (path === "/api;/") return response("admin panel");
+    if (path.startsWith("/marker")) return response("missing", 404);
+    return response("denied", 403);
+  });
+  ctx.baselines = [response("denied", 403), response("denied", 403)];
+  const output = await check("path-confusion").run(ctx);
+  expect(output.findings).toHaveLength(1);
+  expect(output.findings[0]?.excerpts.join(" ")).toContain(";");
+  expect(output.findings[0]?.summary).toContain("front-end and back-end");
+  ctx.probe = async (r) => {
+    const path = new URL(r.url).pathname;
+    if (path.includes(";") || path.startsWith("/marker")) return response("catch-all shell");
+    return response("denied", 403);
+  };
+  expect((await check("path-confusion").run(ctx)).findings).toHaveLength(0);
+});
+it("denied path through an override header needs root, missing-path and restore controls", async () => {
+  const ctx = context(async (r) => {
+    const url = new URL(r.url);
+    const header = Object.entries(r.headers).find(([k]) =>
+      /X-(Original|Rewrite)-URL/.test(k),
+    )?.[1];
+    if (url.pathname === "/") {
+      if (!header) return response("root");
+      if (header.startsWith("/slurp-missing-")) return response("missing", 404);
+      return response("admin content");
+    }
+    return response("denied", 403);
+  });
+  ctx.baselines = [response("denied", 403), response("denied", 403)];
+  const output = await check("url-override").run(ctx);
+  expect(output.findings).toHaveLength(2);
+  expect(output.findings[0]?.summary).toContain("front-end routed on the header");
+  ctx.probe = async (r) => {
+    const url = new URL(r.url);
+    const header = Object.entries(r.headers).find(([k]) =>
+      /X-(Original|Rewrite)-URL/.test(k),
+    )?.[1];
+    if (url.pathname === "/" && header && header.startsWith("/slurp-missing-"))
+      return response("missing", 404);
+    if (url.pathname === "/" && !header) return response("root");
+    return response("denied", 403);
+  };
+  expect((await check("url-override").run(ctx)).findings).toHaveLength(0);
+});

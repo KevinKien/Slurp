@@ -23,11 +23,21 @@ export type CheckId =
   | "403-bypass"
   | "dependency-audit"
   | "jwt-signature"
+  | "oauth-redirect"
+  | "sql-bypass"
+  | "xss-bypass"
+  | "nosql-bypass"
   | "jwt-confusion"
   | "jwt-weak-secret"
   | "nosql-injection"
   | "nosql-operators"
   | "graphql-introspection"
+  | "graphql-field-suggestion"
+  | "graphql-endpoint"
+  | "openapi-exposure"
+  | "jwt-query"
+  | "prototype-pollution"
+  | "postmessage-audit"
   | "graphql-batching"
   | "http-framing"
   | "browser-xss"
@@ -51,7 +61,12 @@ export type CheckId =
   | "passive-audit"
   | "sql-injection"
   | "ssti"
+  | "ssti-rce"
   | "path-traversal"
+  | "file-inclusion"
+  | "file-upload"
+  | "cache-poisoning"
+  | "cache-deception"
   | "open-redirect"
   | "cookie-audit"
   | "disclosure-audit"
@@ -64,8 +79,11 @@ export type CheckId =
   | "referer-access"
   | "client-ip"
   | "url-override"
+  | "path-confusion"
   | "http-methods"
   | "command-injection"
+  | "command-bypass"
+  | "argument-injection"
   | "code-injection"
   | "el-injection"
   | "ldap-injection"
@@ -233,6 +251,7 @@ export interface BrowserObservation {
   /** Blocked main-frame GET script dependencies, never fetched by Chromium. */
   requestedScripts?: string[];
   sinkTraces?: BrowserSinkTrace[];
+  prototypePolluted?: boolean;
   executed: boolean;
   marker: string;
   url: string;

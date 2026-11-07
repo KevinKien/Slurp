@@ -234,7 +234,7 @@ export async function activateWorkspace(id: string): Promise<void> {
 }
 
 export interface WorkspaceExportOptions { profiles: boolean; intruder: boolean; redact: boolean }
-export interface WorkspaceImportResult { workspace: Workspace; rows: number }
+export interface WorkspaceImportResult { workspace: Workspace; rows: number; merged: boolean; skipped: number; kept_documents: string[] }
 
 async function failure(res: Response): Promise<Error> {
   const detail = await res.json().then((b: { error?: string }) => b.error, () => undefined);
@@ -250,15 +250,90 @@ export async function exportWorkspace(id: string, options: WorkspaceExportOption
   return { blob: await res.blob(), filename };
 }
 
-/** Creates a new workspace from a `.slurp` file. */
-export async function importWorkspace(file: File): Promise<WorkspaceImportResult> {
-  const res = await authorizedFetch(`${API_BASE}/api/workspaces/import`, {
+/** Creates a new workspace from a `.slurp` file, or merges it into `mergeInto` when given. */
+export async function importWorkspace(file: File, mergeInto?: string): Promise<WorkspaceImportResult> {
+  const query = mergeInto ? `?merge_into=${encodeURIComponent(mergeInto)}` : "";
+  const res = await authorizedFetch(`${API_BASE}/api/workspaces/import${query}`, {
     method: "POST",
     headers: { "Content-Type": "application/octet-stream" },
     body: file,
   });
   if (!res.ok) throw await failure(res);
   return res.json();
+}
+
+export interface CaptureClient {
+  id: string;
+  name: string;
+  workspace_id: string;
+  workspace_name: string | null;
+  created_at: string;
+  last_seen_at: string | null;
+}
+
+export async function fetchCaptureClients(): Promise<CaptureClient[]> {
+  return apiFetch<CaptureClient[]>("/api/capture-clients");
+}
+
+/** The token is returned only here; the server keeps just its hash. */
+export async function createCaptureClient(name: string, workspaceId: string): Promise<{ client: CaptureClient; token: string }> {
+  return apiFetch("/api/capture-clients", { method: "POST", body: JSON.stringify({ name, workspace_id: workspaceId }) });
+}
+
+export async function deleteCaptureClient(id: string): Promise<void> {
+  await apiFetch<void>(`/api/capture-clients/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export interface TrustedCa {
+  name: string;
+  source: "file" | "env";
+  subject: string;
+  issuer: string;
+  fingerprint_sha256: string;
+  not_before: number;
+  not_after: number;
+  is_ca: boolean;
+  expired: boolean;
+}
+export interface UpstreamTrust { system: boolean; system_locked: boolean; system_certificates: number; cas: TrustedCa[] }
+
+export async function fetchUpstreamTrust(): Promise<UpstreamTrust> {
+  return apiFetch<UpstreamTrust>("/api/settings/upstream-trust");
+}
+export async function addTrustedCa(name: string, pem: string): Promise<TrustedCa[]> {
+  return apiFetch<TrustedCa[]>("/api/settings/upstream-trust/cas", { method: "POST", body: JSON.stringify({ name, pem }) });
+}
+export async function removeTrustedCa(name: string): Promise<void> {
+  await apiFetch<void>(`/api/settings/upstream-trust/cas/${encodeURIComponent(name)}`, { method: "DELETE" });
+}
+export async function setTrustSystemStore(system: boolean): Promise<UpstreamTrust> {
+  return apiFetch<UpstreamTrust>("/api/settings/upstream-trust", { method: "PUT", body: JSON.stringify({ system }) });
+}
+
+export interface ReverseProxy {
+  id: string;
+  name: string;
+  listen: string;
+  upstream: string;
+  tls: boolean;
+  rewrite_host: boolean;
+  enabled: boolean;
+  running: boolean;
+  error: string | null;
+}
+export interface NewReverseProxy { name: string; listen: string; upstream: string; tls: boolean; rewrite_host: boolean }
+
+export async function fetchReverseProxies(): Promise<{ available: boolean; rules: ReverseProxy[] }> {
+  return apiFetch("/api/settings/reverse-proxies");
+}
+export async function createReverseProxy(rule: NewReverseProxy): Promise<ReverseProxy> {
+  return apiFetch<ReverseProxy>("/api/settings/reverse-proxies", { method: "POST", body: JSON.stringify(rule) });
+}
+export async function setReverseProxyEnabled(id: string, enabled: boolean): Promise<ReverseProxy> {
+  return apiFetch<ReverseProxy>(`/api/settings/reverse-proxies/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ enabled }) });
+}
+export async function deleteReverseProxy(id: string): Promise<void> {
+  await apiFetch<void>(`/api/settings/reverse-proxies/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 export async function fetchInfo(): Promise<ProxyInfo> {

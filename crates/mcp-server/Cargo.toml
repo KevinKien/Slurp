@@ -11,6 +11,7 @@ reqwest = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 rustls = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }

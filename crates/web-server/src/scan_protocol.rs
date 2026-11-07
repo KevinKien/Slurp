@@ -127,8 +127,7 @@ async fn execute(input: Input) -> Result<Value, String> {
     let socket = connected.ok_or("Cannot connect to target")?;
     let mut stream: Box<dyn Stream> = if url.scheme() == "https" {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        let roots =
-            rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let roots = proxy_core::trust::root_store();
         let mut config = rustls::ClientConfig::builder()
             .with_root_certificates(roots)
             .with_no_client_auth();

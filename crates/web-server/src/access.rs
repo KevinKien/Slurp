@@ -29,6 +29,9 @@ impl ApiAccess {
     }
 }
 pub async fn guard(State(access):State<ApiAccess>,request:Request,next:Next)->Response {
+    // Capture clients present their own token; the ingest handlers authenticate it themselves
+    // and it is accepted nowhere else.
+    if request.uri().path().starts_with("/api/ingest/") { return next.run(request).await; }
     if request.uri().path().starts_with("/api/") && request.method()!=axum::http::Method::OPTIONS && !access.authorized(&request) {
         return (StatusCode::UNAUTHORIZED,[(header::CACHE_CONTROL,"no-store")],Json(serde_json::json!({"error":"Open the authenticated Slurp URL printed at startup to connect this browser."}))).into_response();
     }

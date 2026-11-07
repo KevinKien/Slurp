@@ -1145,6 +1145,7 @@ export class ScanEngine {
                     url?: string,
                     resources?: import("./types").BrowserResource[],
                     interaction?: import("./types").BrowserInteraction,
+                    prototypeProperty?: string,
                   ) => {
                     await this.ready();
                     if (!exchange.response) throw Error("No HTML response for browser validation.");

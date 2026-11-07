@@ -8,8 +8,15 @@ import { nosqlOperators } from "./nosql-checks";
 import { jwtWeakSecret } from "./jwt-secret-check";
 import { dependencyAudit } from "./dependency-checks";
 import { tokenGraphqlChecks } from "./token-graphql-checks";
+import { oauthChecks } from "./oauth-checks";
 import { protocolChecks } from "./protocol-checks";
 import { injectionChecks } from "./injection-checks";
+import { bypassChecks } from "./bypass-checks";
+import { uploadChecks } from "./upload-checks";
+import { cacheChecks } from "./cache-checks";
+import { apiChecks } from "./api-checks";
+import { prototypeChecks } from "./prototype-checks";
+import { postmessageChecks } from "./postmessage-check";
 import { browserChecks } from "./browser-checks";
 import { oastChecks } from "./oast-checks";
 import { httpChecks } from "./http-checks";
@@ -372,6 +379,7 @@ export const scanChecks: ReadonlyArray<ScanCheck> = [
   hiddenParameters,
   nosqlOperators,
   ...tokenGraphqlChecks,
+  ...oauthChecks,
   ...protocolChecks,
   ...oastChecks,
   ...browserChecks,
@@ -386,6 +394,12 @@ export const scanChecks: ReadonlyArray<ScanCheck> = [
   corsTrust,
   ...httpChecks,
   ...injectionChecks,
+  ...bypassChecks,
+  ...uploadChecks,
+  ...cacheChecks,
+  ...apiChecks,
+  ...prototypeChecks,
+  ...postmessageChecks,
   ...extendedChecks.filter((check) => check.active),
 ];
 export function getScanCheck(id: string) {

@@ -3,9 +3,18 @@ use proxy_core::{CertificateAuthority, Intercept, ProxyConfig, ProxyServer, Traf
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
+mod remote;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // `slurp server` / `slurp client`: capture on one machine, review on another.
+    match args.first().map(String::as_str) {
+        Some("server") => return remote::server(&args[1..]).await,
+        Some("client") => return remote::client(&args[1..]).await,
+        _ => {}
+    }
 
     // `slurp mcp [--api URL]`: MCP server over stdio for AI clients.
     // stdout is reserved for protocol messages, so logs go to stderr and no banner is printed.
@@ -23,7 +32,7 @@ async fn main() -> Result<()> {
     }
 
     if args.iter().any(|arg| arg != "--no-open") {
-        anyhow::bail!("usage: slurp [--no-open] | slurp mcp [--api URL]");
+        anyhow::bail!("usage: slurp [--no-open] | slurp mcp [--api URL] | slurp server | slurp client");
     }
 
     // Initialize logging
@@ -42,6 +51,8 @@ async fn main() -> Result<()> {
     // Migrate the legacy directory once, retaining the trusted CA and saved workspaces.
     let ca_dir = data_dir(&dirs_home()?)?;
     let access = web_server::access::ApiAccess::load(&ca_dir)?;
+    // CAs trusted for upstream servers (private CAs); see Settings → Trusted upstream CAs.
+    proxy_core::trust::init(ca_dir.join("trusted-cas"))?;
     let ca = Arc::new(CertificateAuthority::load_or_create(&ca_dir)?);
     ca.print_install_instructions();
 
@@ -87,6 +98,10 @@ async fn main() -> Result<()> {
         max_body_size: 10 * 1024 * 1024,
     };
     let proxy = ProxyServer::new(proxy_config, ca.clone(), storage.clone(), intercept);
+    // Reverse proxies (fixed-upstream listeners) saved in Settings start with the proxy.
+    let reverse = proxy.reverse_proxies(ca_dir.join("reverse-proxies.json"));
+    proxy_core::reverse::install(reverse.clone());
+    reverse.start_all().await;
 
     println!("🚀 Slurp is running!");
     println!("   Proxy:    http://{proxy_addr}");
@@ -120,7 +135,7 @@ async fn main() -> Result<()> {
 
 /// Read a socket address from an environment variable, falling back to `default`.
 /// Lets the proxy and API move when another tool already uses the default ports.
-fn env_addr(var: &str, default: &str) -> Result<std::net::SocketAddr> {
+pub(crate) fn env_addr(var: &str, default: &str) -> Result<std::net::SocketAddr> {
     let raw = std::env::var(var)
         .or_else(|_| std::env::var(var.replacen("SLURP_", "HTTPDEBUGGER_", 1)))
         .unwrap_or_else(|_| default.to_string());
@@ -128,7 +143,7 @@ fn env_addr(var: &str, default: &str) -> Result<std::net::SocketAddr> {
         .map_err(|e| anyhow::anyhow!("{var}={raw:?} is not a valid host:port address ({e})"))
 }
 
-fn data_dir(home: &std::path::Path) -> Result<std::path::PathBuf> {
+pub(crate) fn data_dir(home: &std::path::Path) -> Result<std::path::PathBuf> {
     let current = home.join(".slurp");
     let legacy = home.join(".httpdebugger");
     if !current.exists() && legacy.is_dir() {
@@ -140,7 +155,7 @@ fn data_dir(home: &std::path::Path) -> Result<std::path::PathBuf> {
     Ok(current)
 }
 
-fn dirs_home() -> Result<std::path::PathBuf> {
+pub(crate) fn dirs_home() -> Result<std::path::PathBuf> {
     #[cfg(target_os = "windows")]
     let variable = "USERPROFILE";
     #[cfg(not(target_os = "windows"))]

@@ -244,3 +244,57 @@ it("report-only CSP does not enforce framing or style restrictions", async () =>
   expect(titles).toContain("HTML response has no observed framing restriction");
   expect(titles).toContain("HTML response lacks Content-Security-Policy");
 });
+it("file inclusion requires repeated wrapper or decoded signatures absent from controls", async () => {
+  const encoded = btoa("root:x:0:0:root:/root:/bin/bash");
+  const ctx = context(async (r) => {
+    const value = new URL(r.url).searchParams.get("q")!;
+    if (value.includes("/slurp-missing-")) return exchange("not found");
+    if (value.includes("php://filter")) return exchange(encoded);
+    return exchange("ok");
+  });
+  expect((await check("file-inclusion").run(ctx)).findings).toHaveLength(1);
+  ctx.baselines = [exchange(encoded)];
+  expect((await check("file-inclusion").run(ctx)).inconclusive).toBe(true);
+});
+
+it("SSTI recognizes engine-specific arithmetic syntaxes", async () => {
+  const ctx = context(async (r) => {
+    const value = new URL(r.url).searchParams.get("q")!;
+    const evaluated = value.replace(/\$\{(\d+)\*(\d+)\}/g, (_, a, b) => String(Number(a) * Number(b)));
+    return exchange(evaluated);
+  });
+  const output = await check("ssti").run(ctx);
+  expect(output.findings).toHaveLength(1);
+  expect(output.findings[0]?.title).toContain("Freemarker/JSP EL");
+});
+
+it("SSTI reports template parser errors from the polyglot without claiming evaluation", async () => {
+  const ctx = context(async (r) => {
+    const value = new URL(r.url).searchParams.get("q")!;
+    return exchange(
+      value.includes("${{")
+        ? "jinja2.exceptions.TemplateSyntaxError: unexpected char"
+        : "ok",
+    );
+  });
+  const output = await check("ssti").run(ctx);
+  expect(output.findings).toHaveLength(1);
+  expect(output.findings[0]?.title).toContain("polyglot");
+  expect(output.findings[0]?.severity).toBe("low");
+});
+
+it("SSTI engine proof-of-concept needs repeated id output and a benign control", async () => {
+  const ctx = context(async (r) => {
+    const value = new URL(r.url).searchParams.get("q")!;
+    return exchange(
+      value.includes("popen('id')") ? "uid=33(www-data) gid=33(www-data) groups=33" : "ok",
+    );
+  });
+  const output = await check("ssti-rce").run(ctx);
+  expect(output.findings).toHaveLength(1);
+  expect(output.findings[0]?.title).toContain("Jinja2");
+  expect(output.findings[0]?.severity).toBe("high");
+
+  const clean = context(async () => exchange("ok"));
+  expect((await check("ssti-rce").run(clean)).findings).toHaveLength(0);
+});
