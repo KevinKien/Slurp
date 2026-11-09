@@ -7,6 +7,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useScan } from "@/lib/scan-context";
 import { scanChecks, parameterKey, type ScanPlan, type ScanRun } from "@/lib/scan";
+import { defaultScanPolicy } from "@/lib/scan/registry";
 import { scanParameters } from "@/lib/scan-selection";
 import { fetchScanRuns, fetchScanRun, deleteScanRun, type ScanSummary } from "@/lib/scan-api";
 import { Button } from "./ui/button";
@@ -98,6 +99,27 @@ export function ScanView() {
   const candidates = useMemo(() => (plan ? scanParameters(plan.request) : []), [plan?.request]);
   const update = (patch: Partial<ScanPlan>) => {
     if (plan) scan.updateDraft({ ...plan, ...patch });
+  };
+  const applyTemplates = (value: string) => {
+    if (!plan) return;
+    const templates = value ? [value] : undefined;
+    const checks = value
+      ? [...new Set([...plan.checks, "nuclei-template" as const])]
+      : plan.checks.filter((id) => id !== "nuclei-template");
+    update({
+      nucleiTemplates: templates,
+      checks,
+      ...(value && plan.mode !== "passive"
+        ? {
+            policy: {
+              ...(plan.policy ?? defaultScanPolicy),
+              maxImpact: "intrusive" as const,
+              allowIntrusive: true,
+              includeExperimental: true,
+            },
+          }
+        : {}),
+    });
   };
   const remove = async () => {
     if (!run) return;
@@ -299,6 +321,50 @@ export function ScanView() {
                     </>
                   )}
                 </div>
+                {plan.mode !== "passive" ? (
+                  <div className="space-y-3 rounded border p-3">
+                    <p className="text-sm font-medium">Nuclei templates (active scan)</p>
+                    <p className="text-xs text-muted-foreground">
+                      Templates are added to this active scan automatically. Supported: http
+                      GET/POST, status/word/regex/size matchers, same-origin paths and BaseURL/
+                      Hostname/Host/Port/Scheme/rand variables. Raw requests, payloads/attack,
+                      code/javascript/headless/network/dns/file protocols and cross-origin paths
+                      are rejected before sending. Maximum 5 templates and 10 requests each.
+                    </p>
+                    <input
+                      aria-label="Import Nuclei template files"
+                      className="block w-full text-xs"
+                      type="file"
+                      accept=".yaml,.yml"
+                      multiple
+                      onChange={async (e) => {
+                        const files = [...(e.target.files ?? [])];
+                        const texts = await Promise.all(files.map((file) => file.text()));
+                        const existing = (plan.nucleiTemplates ?? []).join("\n---\n");
+                        const combined = [existing, ...texts].filter(Boolean).join("\n---\n");
+                        applyTemplates(combined);
+                        e.target.value = "";
+                      }}
+                    />
+                    <textarea
+                      aria-label="Nuclei template YAML"
+                      className={`${input} w-full min-h-40 font-mono text-xs`}
+                      placeholder={"id: example\ninfo:\n  name: Example\n  severity: info\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/\"]\n    matchers:\n      - type: status\n        status: [200]"}
+                      maxLength={200000}
+                      value={(plan.nucleiTemplates ?? []).join("\n---\n")}
+                      onChange={(e) => applyTemplates(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Non-empty templates automatically enable <code>nuclei-template</code> and the
+                      intrusive policy. Only the selected origin is contacted; a match is a
+                      detection, not proof of exploitability. Enable sending requests below.
+                    </p>
+                  </div>
+                ) : (
+                  <p className="rounded border p-3 text-xs text-muted-foreground">
+                    Nuclei templates run only in active scans.
+                  </p>
+                )}
                 {plan.checks.includes("jwt-confusion") && (
                   <label className="block space-y-2 text-sm">
                     <span>JWT RSA public key or certificate (PEM)</span>

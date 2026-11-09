@@ -91,7 +91,7 @@ const defaults: Profile[] = [
     id: "default-browser-xss",
     name: "Browser XSS",
     mode: "active",
-    checks: ["browser-xss", "dom-xss"],
+    checks: ["browser-xss", "dom-xss", "mxss", "prototype-xss", "quasar-meta-xss"],
   },
   ...specialized,
 ];

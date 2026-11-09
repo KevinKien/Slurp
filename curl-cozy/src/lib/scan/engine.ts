@@ -1288,6 +1288,9 @@ export class ScanEngine {
               stable,
               diffOptions: this.original.diffOptions,
               ...(parameter && { parameter }),
+              ...(this.original.nucleiTemplates && {
+                nucleiTemplates: this.original.nucleiTemplates,
+              }),
               probe: check.active
                 ? (request, label) =>
                     this.probe(
@@ -1323,6 +1326,9 @@ export class ScanEngine {
                 ...(baselines[0] && { baselineId: baselines[0].evidence.id }),
                 checkId: id,
                 ...(parameter && { parameter }),
+              ...(this.original.nucleiTemplates && {
+                nucleiTemplates: this.original.nucleiTemplates,
+              }),
                 fingerprint: JSON.stringify([
                   this.original.request.method,
                   endpoint.origin,

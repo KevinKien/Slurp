@@ -323,6 +323,12 @@ function FindingDetail({ run, finding: f }: { run: ScanRun; finding: Finding }) 
                           ))}
                         </div>
                       )}
+                      {!!observation.dialogs?.length && (
+                        <p className="break-all">
+                          <strong>JavaScript dialogs:</strong>{" "}
+                          {observation.dialogs.join(" · ")}
+                        </p>
+                      )}
                       {observation.cspViolations.map((violation, i) => (
                         <p key={i} className="whitespace-pre-wrap">
                           {violation}

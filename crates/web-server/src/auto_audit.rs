@@ -164,7 +164,13 @@ pub fn start(
     tasks.extend(start_cve_audit(storage_for_crlf.clone(), intercept_for_crlf.clone(), state.clone(), "php2shell"));
     tasks.extend(start_cve_audit(storage_for_crlf.clone(), intercept_for_crlf.clone(), state.clone(), "http2shell"));
     tasks.extend(start_cve_audit(storage_for_crlf.clone(), intercept_for_crlf.clone(), state.clone(), "react2shell"));
-    tasks.extend(start_cve_audit(storage_for_crlf, intercept_for_crlf, state.clone(), "oauth-redirect"));
+    tasks.extend(start_cve_audit(storage_for_crlf.clone(), intercept_for_crlf.clone(), state.clone(), "oauth-redirect"));
+    tasks.extend(start_cve_audit(storage_for_crlf.clone(), intercept_for_crlf.clone(), state.clone(), "hapi-content"));
+    tasks.extend(start_cve_audit(storage_for_crlf.clone(), intercept_for_crlf.clone(), state.clone(), "nuxt-dot-segments"));
+    tasks.extend(start_cve_audit(storage_for_crlf.clone(), intercept_for_crlf.clone(), state.clone(), "daptin-accept-language"));
+    tasks.extend(start_cve_audit(storage_for_crlf.clone(), intercept_for_crlf.clone(), state.clone(), "echo-static-bypass"));
+    tasks.extend(start_cve_audit(storage_for_crlf.clone(), intercept_for_crlf.clone(), state.clone(), "rembg-sam-injection"));
+    tasks.extend(start_cve_audit(storage_for_crlf, intercept_for_crlf, state.clone(), "nginx-ui-node-secret"));
     (state, AuditRuntime(tasks))
 }
 
@@ -174,6 +180,12 @@ fn cve_eligible(check: &str, entry: &TrafficEntry) -> bool {
         "http2shell" => super::http2shell::eligible(entry),
         "react2shell" => super::react2shell::eligible(entry),
         "oauth-redirect" => super::oauth_audit::eligible(entry),
+        "hapi-content" => super::hapi_content::eligible(entry),
+        "nuxt-dot-segments" => super::nuxt_dot_segments::eligible(entry),
+        "daptin-accept-language" => super::daptin_language::eligible(entry),
+        "echo-static-bypass" => super::echo_static_bypass::eligible(entry),
+        "rembg-sam-injection" => super::rembg_sam::eligible(entry),
+        "nginx-ui-node-secret" => super::nginx_ui_secret::eligible(entry),
         _ => false,
     }
 }
@@ -183,13 +195,25 @@ fn cve_key(check: &str, request: &Value) -> String {
         "php2shell" => super::php2shell::key(request),
         "http2shell" => super::http2shell::key(request),
         "react2shell" => super::react2shell::key(request),
-        _ => super::oauth_audit::key(request),
+        "oauth-redirect" => super::oauth_audit::key(request),
+        "hapi-content" => super::hapi_content::key(request),
+        "nuxt-dot-segments" => super::nuxt_dot_segments::key(request),
+        "daptin-accept-language" => super::daptin_language::key(request),
+        "echo-static-bypass" => super::echo_static_bypass::key(request),
+        "rembg-sam-injection" => super::rembg_sam::key(request),
+        _ => super::nginx_ui_secret::key(request),
     }
 }
 
 /// CVE exposure audits keep their own queue and dedup key so one check cannot delay another.
 /// `php2shell` is passive, `http2shell` sends one bounded differential probe, `react2shell`
-/// sends one ordinary RSC navigation and `oauth-redirect` audits captured authorize requests;
+/// sends one ordinary RSC navigation, `oauth-redirect` audits captured authorize requests and
+/// `hapi-content` sends bounded 16/32 KB timing probes to captured multipart requests and
+/// `nuxt-dot-segments` replays encoded page paths for the Nuxt advisory and `daptin-accept-language`
+/// sends a bounded underscore-separated Accept-Language header to a Daptin fingerprint and
+/// `echo-static-bypass` replays encoded dot-dot static paths for Echo and `rembg-sam-injection`
+/// passively flags captured rembg /api/remove requests without sending an exploit and
+/// `nginx-ui-node-secret` passively reports node_secret in captured URLs/Referer;
 /// none sends an exploit payload or uses a captured authorization code.
 fn start_cve_audit(
     storage: Arc<TrafficStorage>,
@@ -265,7 +289,13 @@ fn start_cve_audit(
                 "php2shell" => super::php2shell::audit(&entry, &run_id, &state, &intercept).await,
                 "http2shell" => super::http2shell::audit(&entry, &run_id, &state, &intercept).await,
                 "react2shell" => super::react2shell::audit(&entry, &run_id, &state, &intercept).await,
-                _ => super::oauth_audit::audit(&entry, &run_id, &state, &intercept).await,
+                "oauth-redirect" => super::oauth_audit::audit(&entry, &run_id, &state, &intercept).await,
+                "hapi-content" => super::hapi_content::audit(&entry, &run_id, &state, &intercept).await,
+                "nuxt-dot-segments" => super::nuxt_dot_segments::audit(&entry, &run_id, &state, &intercept).await,
+                "daptin-accept-language" => super::daptin_language::audit(&entry, &run_id, &state, &intercept).await,
+                "echo-static-bypass" => super::echo_static_bypass::audit(&entry, &run_id, &state, &intercept).await,
+                "rembg-sam-injection" => super::rembg_sam::audit(&entry, &run_id, &state, &intercept).await,
+                _ => super::nginx_ui_secret::audit(&entry, &run_id, &state, &intercept).await,
             };
             if let Some(run) = result {
                 if storage.get(&id).ok().flatten().is_some() {

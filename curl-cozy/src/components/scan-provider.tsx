@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { sendHttpRequest } from "@/lib/replay.functions";
 import { ScanEngine, newScanPlan, type ScanPlan, type ScanRun } from "@/lib/scan";
+import { defaultScanPolicy } from "@/lib/scan/registry";
 import {
   saveScanRun,
   probeHttpProtocol,
@@ -131,8 +132,23 @@ export function ScanProvider({ children }: { children: ReactNode }) {
     // Observed traffic is inspected exactly as captured. Active scans snapshot the chosen profile once.
     const identity =
       plan.mode !== "passive" || !plan.observed ? auth.createSession(profileId, variables) : null;
+    const templates =
+      plan.mode !== "passive" && plan.nucleiTemplates?.length
+        ? [...new Set([...plan.checks, "nuclei-template" as const])]
+        : plan.checks;
     const prepared = {
       ...structuredClone(plan),
+      checks: templates,
+      ...(plan.mode !== "passive" && plan.nucleiTemplates?.length
+        ? {
+            policy: {
+              ...(plan.policy ?? defaultScanPolicy),
+              maxImpact: "intrusive" as const,
+              allowIntrusive: true,
+              includeExperimental: true,
+            },
+          }
+        : {}),
       jsEndpointScan: plan.mode !== "passive" && plan.jsEndpointScan === true,
       allowSending:
         plan.allowSending || (!plan.crawlBeforeScan && plan.mode === "passive" && !plan.observed),

@@ -17,6 +17,13 @@ import { cacheChecks } from "./cache-checks";
 import { apiChecks } from "./api-checks";
 import { prototypeChecks } from "./prototype-checks";
 import { postmessageChecks } from "./postmessage-check";
+import { nucleiChecks } from "./nuclei-check";
+import { mercuryChecks } from "./mercury-check";
+import { prototypeXssChecks } from "./prototype-xss";
+import { svgEntityChecks } from "./svg-entity-check";
+import { serializeJsChecks } from "./serialize-js-check";
+import { angularPiChecks } from "./angular-pi-check";
+import { twigConcatChecks } from "./twig-concat-check";
 import { browserChecks } from "./browser-checks";
 import { oastChecks } from "./oast-checks";
 import { httpChecks } from "./http-checks";
@@ -400,6 +407,13 @@ export const scanChecks: ReadonlyArray<ScanCheck> = [
   ...apiChecks,
   ...prototypeChecks,
   ...postmessageChecks,
+  ...nucleiChecks,
+  ...mercuryChecks,
+  ...prototypeXssChecks,
+  ...svgEntityChecks,
+  ...serializeJsChecks,
+  ...angularPiChecks,
+  ...twigConcatChecks,
   ...extendedChecks.filter((check) => check.active),
 ];
 export function getScanCheck(id: string) {

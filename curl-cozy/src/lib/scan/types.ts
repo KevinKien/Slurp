@@ -38,6 +38,15 @@ export type CheckId =
   | "jwt-query"
   | "prototype-pollution"
   | "postmessage-audit"
+  | "nuclei-template"
+  | "mercury-markdown-xss"
+  | "mxss"
+  | "prototype-xss"
+  | "svg-entity-xss"
+  | "serialize-js-xss"
+  | "angular-pi-xss"
+  | "twig-concat-xss"
+  | "quasar-meta-xss"
   | "graphql-batching"
   | "http-framing"
   | "browser-xss"
@@ -114,6 +123,8 @@ export interface ScanPlan {
   crawlOptions?: import("./crawler").CrawlOptions;
   /** Follow up on endpoints already extracted from captured JavaScript (requires allowSending). */
   jsEndpointScan?: boolean;
+  /** User-supplied Nuclei template YAML documents for the bounded native subset. */
+  nucleiTemplates?: string[] | undefined;
   jsEndpointOptions?: { maxEndpoints: number };
   businessReadback?: BusinessReadback | undefined;
   /** RSA SPKI/PKCS#1 public PEM or X.509 certificate PEM for algorithm-confusion verification; never a private key. */
@@ -231,6 +242,7 @@ export interface ScanCheckContext {
   ) => Promise<import("./dependency-checks").DependencyResult | { ok: false; error: string }>;
   protocol?: (variant: ProtocolVariant, label: string) => Promise<Exchange>;
   oast?: OastClient;
+  nucleiTemplates?: string[] | undefined;
   loadScript?: (url: string) => Promise<Exchange>;
   recordDomAudit?: (audit: import("./dom-audit").DomAudit) => void;
   browser?: import("./browser-checks").BrowserValidator;
@@ -252,6 +264,7 @@ export interface BrowserObservation {
   requestedScripts?: string[];
   sinkTraces?: BrowserSinkTrace[];
   prototypePolluted?: boolean;
+  dialogs?: string[];
   executed: boolean;
   marker: string;
   url: string;

@@ -56,6 +56,7 @@ struct Observation {
     requested_scripts: Vec<String>,
     interactions: Vec<String>,
     prototype_polluted: bool,
+    dialogs: Vec<String>,
 }
 fn executable() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("SLURP_BROWSER_PATH") {
@@ -345,6 +346,17 @@ impl Cdp {
                     }
                 }
                 "Page.javascriptDialogOpening" => {
+                    let message = p["message"].as_str().unwrap_or("");
+                    if self.observation.dialogs.len() < 8 {
+                        self.observation.dialogs.push(format!(
+                            "{}: {}",
+                            p["type"].as_str().unwrap_or("dialog"),
+                            message.chars().take(500).collect::<String>()
+                        ));
+                    }
+                    if message.contains(&self.marker) {
+                        self.observation.executed = true;
+                    }
                     self.send("Page.handleJavaScriptDialog", json!({"accept":false}))
                         .await?;
                 }
