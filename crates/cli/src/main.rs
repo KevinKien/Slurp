@@ -31,8 +31,29 @@ async fn main() -> Result<()> {
         return mcp_server::run_stdio(&api).await;
     }
 
-    if args.iter().any(|arg| arg != "--no-open") {
-        anyhow::bail!("usage: slurp [--no-open] | slurp mcp [--api URL] | slurp server | slurp client");
+    let mut no_open = false;
+    let mut public_url: Option<String> = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--no-open" => no_open = true,
+            "--public-url" => {
+                index += 1;
+                let value = args.get(index).ok_or_else(|| anyhow::anyhow!("--public-url needs an http(s) origin"))?;
+                let url = url::Url::parse(value)
+                    .map_err(|_| anyhow::anyhow!("--public-url must be a valid http(s) origin"))?;
+                if !["http", "https"].contains(&url.scheme()) || !url.username().is_empty() || url.password().is_some() {
+                    anyhow::bail!("--public-url must be an http(s) origin without credentials");
+                }
+                public_url = Some(url.origin().ascii_serialization());
+            }
+            other => anyhow::bail!("unknown argument: {other}\nusage: slurp [--no-open] [--public-url https://HOST] | slurp mcp [--api URL] | slurp server | slurp client"),
+        }
+        index += 1;
+    }
+    if let Some(url) = public_url {
+        // The Host/Origin guard reads this to accept traffic through a tunnel/reverse proxy.
+        std::env::set_var("SLURP_PUBLIC_URL", url);
     }
 
     // Initialize logging
@@ -107,7 +128,11 @@ async fn main() -> Result<()> {
     println!("   Proxy:    http://{proxy_addr}");
     let mut browser_addr = web_addr;
     if browser_addr.ip().is_unspecified() { browser_addr.set_ip(if browser_addr.is_ipv4() { std::net::Ipv4Addr::LOCALHOST.into() } else { std::net::Ipv6Addr::LOCALHOST.into() }); }
-    let ui_url = format!("http://{browser_addr}/dashboard#slurp-token={}",access.token());
+    let public_base = std::env::var("SLURP_PUBLIC_URL").ok().filter(|value| !value.trim().is_empty());
+    let ui_url = match public_base {
+        Some(base) => format!("{}/dashboard#slurp-token={}", base.trim_end_matches('/'), access.token()),
+        None => format!("http://{browser_addr}/dashboard#slurp-token={}", access.token()),
+    };
     println!("   UI:       {ui_url}");
     println!("   API:      http://{web_addr}/api/traffic");
     println!("   WebSocket: ws://{web_addr}/api/ws");
@@ -122,7 +147,7 @@ async fn main() -> Result<()> {
     println!();
 
     #[cfg(feature = "embedded-ui")]
-    if !args.iter().any(|arg| arg == "--no-open") { open_browser(&ui_url); }
+    if !no_open { open_browser(&ui_url); }
     tokio::select! {
         result = proxy.run_managed(listener) => result?,
         result = web_task => result??,

@@ -108,6 +108,15 @@ Slurp starts the proxy and opens the authenticated web UI in your browser. If th
 | UI/API server | `http://127.0.0.1:5174` |
 | HTTP/HTTPS proxy | `127.0.0.1:8888` |
 
+Behind a tunnel or reverse proxy, pass the exact public origin so the Host/Origin guard accepts it:
+
+```sh
+./slurp --public-url https://slurp.example.com
+# or: SLURP_PUBLIC_URL=https://slurp.example.com ./slurp
+```
+
+The printed UI link then uses that origin. The guard allows only the public origin and its exact Host; requests with any other Host or Origin still receive 403.
+
 Saved proxy settings can override the default listener. Change its IP and port under **Settings → Proxy listener** without restarting the backend.
 
 Stop an existing instance before starting another on the same ports. For the CLI, press **Ctrl+C** to stop Slurp; for the macOS app, use **Quit Slurp**. Closing the browser leaves the backend running. When upgrading, launch the new executable by its actual path so an older copy is not started accidentally.
