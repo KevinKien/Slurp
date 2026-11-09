@@ -26,15 +26,31 @@ impl AllowedOrigins {
         let Some(host)=url.host_str().filter(|_|["http","https"].contains(&url.scheme())&&url.username().is_empty()&&url.password().is_none()) else {return self};
         let authority=match url.port() { Some(port)=>format!("{host}:{port}"), None=>host.to_owned() };
         let (mut origins,mut hosts)=((*self.origins).clone(),(*self.hosts).clone());
-        origins.push(url.origin().ascii_serialization());hosts.push(authority);
+        origins.push(url.origin().ascii_serialization());
+        hosts.push(authority.to_ascii_lowercase());
+        // Cloudflare and some reverse proxies preserve the default port in Host.
+        if url.port().is_none() {
+            let default_port = if url.scheme() == "https" { 443 } else { 80 };
+            hosts.push(format!("{}:{default_port}", host.to_ascii_lowercase()));
+        }
         Self{origins:Arc::new(origins),hosts:Arc::new(hosts)}
     }
     pub fn is_allowed(&self,origin:&str)->bool {self.origins.iter().any(|v|v==origin)}
     pub fn cors_predicate(&self)->AllowOrigin {let this=self.clone();AllowOrigin::predicate(move|origin:&HeaderValue,_|origin.to_str().is_ok_and(|o|this.is_allowed(o)))}
 }
+fn normalise_host(value:&str)->String { value.trim().trim_end_matches('.').to_ascii_lowercase() }
 pub async fn guard(State(allowed):State<AllowedOrigins>,request:Request,next:Next)->Response {
-    let host=request.headers().get(header::HOST).and_then(|v|v.to_str().ok());
-    if !host.is_some_and(|h|allowed.hosts.iter().any(|v|v.eq_ignore_ascii_case(h))) {return (StatusCode::FORBIDDEN,"host not allowed").into_response();}
+    let host=request.headers().get(header::HOST).and_then(|v|v.to_str().ok()).map(normalise_host);
+    // Cloudflare Tunnel can forward the public name in X-Forwarded-Host when an
+    // origin Host is supplied by the tunnel. Accept only the explicitly allowed host.
+    let forwarded=request.headers().get("x-forwarded-host").and_then(|v|v.to_str().ok())
+        .and_then(|v|v.split(',').next()).map(normalise_host);
+    let allowed_host=host.as_deref().filter(|h|allowed.hosts.iter().any(|v|v.eq_ignore_ascii_case(h)))
+        .or_else(|| forwarded.as_deref().filter(|h|allowed.hosts.iter().any(|v|v.eq_ignore_ascii_case(h))));
+    if allowed_host.is_none() {
+        tracing::warn!(host=?host, x_forwarded_host=?forwarded, "rejected management request host");
+        return (StatusCode::FORBIDDEN,"host not allowed").into_response();
+    }
     if let Some(origin)=request.headers().get(header::ORIGIN) {
         if !origin.to_str().is_ok_and(|o|allowed.is_allowed(o)){return (StatusCode::FORBIDDEN,"origin not allowed").into_response();}
     }
