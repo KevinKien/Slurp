@@ -1,0 +1,6 @@
+Slurp
+Copyright 2026 Kien Vu and the Slurp contributors
+
+This product includes software developed by the Slurp project.
+Third-party components are distributed under their own licenses; see
+Cargo.lock and curl-cozy/package.json for the full dependency list.

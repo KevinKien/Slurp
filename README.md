@@ -21,6 +21,8 @@ The standalone executable serves both the web UI and API. No Node.js runtime is 
 - **Scan Dashboard:** monitor tasks and findings, automatically audit captured APIs for missing authentication and permissive CORS, compare disclosed PHP releases with PHP2Shell (CVE-2026-109618, CVE-2026-109619), flag HTTP2Shell (CVE-2026-111497) Brotli request-body decoding and React2Shell (CVE-2025-55182) RSC exposure, and passively discover endpoints and suspected credentials in captured JavaScript. Review evidence and pause automatic auditing from the dashboard. Manual scans use reusable Passive/Active profiles, time/rate controls and a coverage catalog. Active scans can follow up on endpoints discovered in JavaScript with hidden-parameter, anonymous-access and parameter checks, and include an OAuth redirect_uri/login-chain check. Captured OAuth authorize requests are also audited automatically for redirect_uri strictness, state/nonce, form_post injection, callback takeover and unverified ID-token emails. Manual scans include WAF/filter bypass payload sets for SQL injection (`sql-bypass`), reflected XSS (`xss-bypass`) and query/form NoSQL bracket operators (`nosql-bypass`). Experimental active modules cover controlled command/code/EL, LDAP/XPath/XML and local-file XXE probes, with intrusive checks explicitly selected in profiles.
 - **Scope & Filters:** focus History and Intercept on configured target domains.
 - **Utilities:** Base64, URL, HTML and hex encoding/decoding, UUID generation, and JWT decoding.
+- **React2Shell (CVE-2025-55182):** the automatic audit separates *React Server Components in use* (strong evidence only) from *patched or not* (Next.js version read from the public bundle and compared with the fixed releases; an unreadable version is informational, never "vulnerable"). **Tools → React2Shell lockfile** judges `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock` and `bun.lock` offline. No Flight or Server Function payload is ever sent.
+- **GraphQL:** load a schema by introspection (or import it), browse queries, mutations and types with search, turn any field into a ready-to-send operation, edit query, variables and headers, and send or hand the request to Replay. Right-click a captured request and choose **Open in GraphQL**.
 - **Workspaces:** organize saved traffic, Replay tabs and testing data locally. Export a workspace to a `.slurp` file (optionally redacting secrets and leaving out authentication profiles or Intruder data) and import it on another machine. Import either creates a new workspace or merges into an existing one, and never overwrites existing data.
 - **MCP:** let AI clients search and read traffic, run passive and active scans, create and edit Replay requests, rename tabs, and send saved requests.
 
@@ -33,7 +35,7 @@ Planned development builds on the current inspection and scan capabilities:
 - **Template-based scanning:** support reusable scan templates for defining requests, payloads, matchers and verification steps.
 - **Analysis plugins:** develop a plugin system for extending Slurp, including JavaScript analysis and endpoint discovery.
 - **Parameter discovery:** discover and test additional query, body and header parameters.
-- **GraphQL integration:** add GraphQL-aware inspection, request editing, schema exploration and security testing.
+- **GraphQL editor extensions:** schema-aware autocomplete and validation, subscriptions over WebSocket, SDL import and schema comparison.
 - **Remote capture extensions:** forward WebSocket traffic and interception from capture clients, and send Replay through a client.
 
 ## Servers with a private CA
@@ -213,3 +215,7 @@ For a different API port, use `args: ["mcp", "--api", "http://127.0.0.1:15174"]`
 Connected assistants can read captured credentials and bodies. `send_replay` sends real requests, and `clear_traffic` deletes history; use your client's tool approval controls accordingly.
 
 The setup guide is also available inside Slurp at **Documentation → MCP client setup**.
+
+## License
+
+Slurp is open source under the [Apache License 2.0](LICENSE). Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) and the [Contributor License Agreement](CLA.md). Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).

@@ -66,9 +66,15 @@ Desktop.ini
 # Local management credential
 api-token
 
+# Raw scan benchmark output (curl-cozy/benchmark/RESULTS.md is the committed summary)
+/curl-cozy/benchmark/results/
+
 # Local codebase analysis notes
 /CODEBASE_ANALYSIS.md
 /COMPLETENESS_REVIEW.md
 
 # Local bug bounty research notes
 /BUG_BOUNTY_WRITEUPS.md
+
+# Local analysis exports
+/tmp-analysis.html
