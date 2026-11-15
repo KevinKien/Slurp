@@ -70,51 +70,60 @@ export const sqlTime: ScanCheck = {
     if (Math.max(...durations) - Math.min(...durations) > 250 || Math.max(...durations) > 1000)
       return result("Baseline timing is noisy or slow; timing check skipped.", true);
     const original = value(ctx);
-    const rows: Exchange[] = [];
-    for (const seconds of [0, 2, 2, 0])
-      rows.push(
-        await ctx.probe(
-          mutateParameter(
-            ctx.request,
-            ctx.parameter,
-            `${original}' AND (SELECT 1 FROM (SELECT SLEEP(${seconds}))slurp)=1-- `,
+    // The injection point is either quoted (a string) or bare (a number). A stray quote in a numeric
+    // context breaks the query and the response changes, so a form whose responses differ from the
+    // baseline says nothing and the other form is tried, as the boolean check does.
+    let notApplicable = false;
+    for (const quote of ["'", ""]) {
+      const rows: Exchange[] = [];
+      for (const seconds of [0, 2, 2, 0])
+        rows.push(
+          await ctx.probe(
+            mutateParameter(
+              ctx.request,
+              ctx.parameter,
+              `${original}${quote} AND (SELECT 1 FROM (SELECT SLEEP(${seconds}))slurp)=1-- `,
+            ),
+            `SQL timing ${seconds}s${quote ? "" : " (numeric)"}`,
           ),
-          `SQL timing ${seconds}s`,
-        ),
+        );
+      const restore = await ctx.probe(ctx.request, "Timing original control");
+      if (![...rows, restore].every(ok))
+        return result(
+          "Timing requests failed, timed out or were blocked; timeouts are not findings.",
+          true,
+        );
+      if (!restore.response || !same(restore, ctx.baselines[0]!, ctx))
+        return result("Response content/status changed during timing probes.", true);
+      if (!rows.every((x) => success(x) && same(x, ctx.baselines[0]!, ctx))) {
+        notApplicable = true;
+        continue;
+      }
+      const [a, b, c, d] = rows;
+      const fast = [a!, d!].map((x) => x.response!.duration);
+      const slow = [b!, c!].map((x) => x.response!.duration);
+      if (
+        Math.max(...fast) - Math.min(...fast) > 250 ||
+        Math.max(...slow) - Math.min(...slow) > 400 ||
+        restore.response!.duration > Math.max(...durations) + 500
+      )
+        return result("Timing controls are unstable.", true);
+      if (Math.min(...slow) - Math.max(...fast) < 1500) continue;
+      return observation(
+        "Possible SQL injection: repeated controlled delay",
+        `Two SLEEP(2) probes (${quote ? "quoted" : "numeric"} context) were slower than interleaved SLEEP(0) controls, with stable response content and restored baseline. Queueing and application behavior can still mimic timing; this is not confirmed SQL execution.`,
+        [...ctx.baselines, ...rows, restore],
+        [
+          `Fast controls (ms): ${fast.join(", ")}`,
+          `Delayed probes (ms): ${slow.join(", ")}`,
+          `Original control (ms): ${restore.response!.duration}`,
+        ],
+        "medium",
       );
-    const restore = await ctx.probe(ctx.request, "Timing original control");
-    if (![...rows, restore].every(success))
-      return result(
-        "Timing requests failed, timed out or were blocked; timeouts are not findings.",
-        true,
-      );
-    const [a, b, c, d] = rows;
-    const fast = [a!, d!].map((x) => x.response!.duration);
-    const slow = [b!, c!].map((x) => x.response!.duration);
-    if (
-      !rows.every((x) => same(x, ctx.baselines[0]!, ctx)) ||
-      !same(restore, ctx.baselines[0]!, ctx)
-    )
-      return result("Response content/status changed during timing probes.", true);
-    if (
-      Math.max(...fast) - Math.min(...fast) > 250 ||
-      Math.max(...slow) - Math.min(...slow) > 400 ||
-      restore.response!.duration > Math.max(...durations) + 500
-    )
-      return result("Timing controls are unstable.", true);
-    if (Math.min(...slow) - Math.max(...fast) < 1500)
-      return result("No repeatable delay above the timing threshold.");
-    return observation(
-      "Possible SQL injection: repeated controlled delay",
-      "Two SLEEP(2) probes were slower than interleaved SLEEP(0) controls, with stable response content and restored baseline. Queueing and application behavior can still mimic timing; this is not confirmed SQL execution.",
-      [...ctx.baselines, ...rows, restore],
-      [
-        `Fast controls (ms): ${fast.join(", ")}`,
-        `Delayed probes (ms): ${slow.join(", ")}`,
-        `Original control (ms): ${restore.response!.duration}`,
-      ],
-      "medium",
-    );
+    }
+    return notApplicable
+      ? result("Timing probes changed the response in every context tried; no timing comparison was possible.", true)
+      : result("No repeatable delay above the timing threshold.");
   },
 };
 export const headerInjection: ScanCheck = {

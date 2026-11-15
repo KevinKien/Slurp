@@ -431,6 +431,10 @@ fn eligible(entry: &TrafficEntry) -> bool {
         && ["http", "https"].contains(&entry.scheme.as_str())
         && !headers(&entry.request_headers).contains_key("upgrade")
 }
+/// `image/webp`, `image/png`, … Images are static assets, not authenticated API responses.
+fn is_image_type(content_type: &str) -> bool {
+    content_type.trim().to_ascii_lowercase().starts_with("image/")
+}
 fn is_api(entry: &TrafficEntry) -> bool {
     let mime = entry
         .response_content_type
@@ -448,8 +452,13 @@ fn is_api(entry: &TrafficEntry) -> bool {
         .next()
         .unwrap_or("")
         .to_ascii_lowercase();
+    // An image is skipped by its content type even when served from an /api/ path.
+    if is_image_type(&mime) {
+        return false;
+    }
     if [
-        ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".map",
+        ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".map", ".webp",
+        ".avif", ".bmp", ".tif", ".tiff",
     ]
     .iter()
     .any(|suffix| path.ends_with(suffix))
@@ -711,6 +720,10 @@ async fn audit_api(
     for (check, request) in [("noauthen", anonymous), ("cors", cors)] {
         // Without a recognized credential the "anonymous" request equals the original one, so a
         // 200 proves nothing about authentication. Count it as clean and send nothing.
+        if check == "noauthen" && entry.response_content_type.as_deref().is_some_and(is_image_type) {
+            checks.push(json!({"checkId":check,"status":"skipped","message":"Image response (Content-Type: image/*); not an API authentication check","findingIds":[]}));
+            continue;
+        }
         if check == "noauthen" && removed.is_empty() {
             checks.push(json!({"checkId":check,"status":"passed","message":"Request carried no recognized credentials; nothing to remove, so no authentication comparison was made","findingIds":[]}));
             continue;
@@ -742,7 +755,11 @@ async fn audit_api(
             item["truncated"] =
                 json!(body.chars().count() > 32000 || bounded_headers.len() != header_count);
             item["response"] = json!({"status":result["status"],"responseHeaders":bounded_headers,"responseBody":preview(body,32000)});
-            if check == "noauthen" && result["status"] == 200 {
+            // The anonymous response can differ from the captured one (a placeholder image, for example).
+            let image_response = result["responseHeaders"].as_object().is_some_and(|h| {
+                h.iter().any(|(name, value)| name.eq_ignore_ascii_case("content-type") && value.as_str().is_some_and(is_image_type))
+            });
+            if check == "noauthen" && result["status"] == 200 && !image_response {
                 let removed = if removed.is_empty() {
                     "No recognized header/query credentials were present".to_string()
                 } else {
@@ -827,6 +844,46 @@ mod tests {
         })
         .await
         .expect("Automatic run did not finish")
+    }
+    #[test]
+    fn images_are_not_audited_even_under_an_api_path() {
+        let mut entry = captured("http://127.0.0.1/api/avatar");
+        entry.path = "/api/avatar".into();
+        assert!(is_api(&entry));
+        for content_type in ["image/webp", "IMAGE/WEBP", "image/png; charset=binary", " image/avif"] {
+            entry.response_content_type = Some(content_type.into());
+            assert!(!is_api(&entry), "{content_type}");
+        }
+        entry.response_content_type = Some("application/json".into());
+        entry.path = "/api/photo.webp".into();
+        assert!(!is_api(&entry), "an image extension is skipped too");
+    }
+    #[tokio::test]
+    async fn an_image_response_is_never_reported_as_unauthenticated_access() {
+        let received = Arc::new(std::sync::Mutex::new(0usize));
+        let seen = received.clone();
+        let app = Router::new().route("/api/avatar", any(move || {
+            let seen = seen.clone();
+            async move { *seen.lock().unwrap() += 1; ([("content-type", "image/webp")], "RIFFxxxxWEBP") }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let storage = TrafficStorage::new(":memory:", 1000000).unwrap();
+        let intercept = Intercept::new(storage.clone());
+        let (state, _runtime) = start(storage, intercept.clone());
+        // The capture says JSON (so the audit runs), but the anonymous replay returns an image.
+        let entry = captured(&format!("http://{addr}/api/avatar"));
+        let run = audit_api(&entry, "id", &state, &intercept).await.unwrap();
+        assert!(run["findings"].as_array().unwrap().iter().all(|f| f["checkId"] != "noauthen"), "{run}");
+        assert_eq!(*received.lock().unwrap(), 2, "the anonymous and CORS probes were sent");
+        // A captured image skips the NoAuthen probe entirely.
+        let mut image = captured(&format!("http://{addr}/api/avatar"));
+        image.response_content_type = Some("image/webp".into());
+        let run = audit_api(&image, "id2", &state, &intercept).await.unwrap();
+        let noauthen = run["checks"].as_array().unwrap().iter().find(|c| c["checkId"] == "noauthen").unwrap();
+        assert_eq!(noauthen["status"], "skipped");
+        assert_eq!(*received.lock().unwrap(), 3, "only the CORS probe was sent");
     }
     #[tokio::test]
     async fn requests_without_credentials_skip_noauthen_and_send_only_cors() {

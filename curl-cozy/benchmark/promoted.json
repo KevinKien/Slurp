@@ -1,0 +1,1 @@
+["code-injection", "command-bypass", "command-injection", "cors-trust", "file-upload", "jwt-signature", "path-traversal", "sql-boolean", "sql-injection", "sql-time", "ssti", "url-override", "xml-entity-body", "xml-injection-body", "xxe", "xxe-body"]

@@ -46,6 +46,11 @@ pub(super) fn eligible(entry: &TrafficEntry) -> bool {
 
 /// Parse a `PHP` version marker from arbitrary text: `PHP/8.4.26`, `PHP 8.5`, `php-8.4.26`.
 pub(super) fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
+    parse_parts(text).map(|n| (n[0], n[1], n.get(2).copied().unwrap_or(0)))
+}
+
+/// The numeric components after the first `PHP` marker that has at least two of them.
+fn parse_parts(text: &str) -> Option<Vec<u32>> {
     let lower = text.to_ascii_lowercase();
     let mut from = 0;
     while let Some(position) = lower[from..].find("php") {
@@ -75,7 +80,7 @@ pub(super) fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
             numbers.push(value);
         }
         if numbers.len() >= 2 {
-            return Some((numbers[0], numbers[1], numbers.get(2).copied().unwrap_or(0)));
+            return Some(numbers);
         }
         from = from + position + 3;
     }
@@ -128,16 +133,43 @@ fn disclosed_version(
             }
         }
     }
+    // A page that merely talks about PHP ("requires PHP 7.4", a changelog, a blog post) is not
+    // disclosure. Only a phpinfo-style "PHP Version x.y.z" or a "PHP/x.y.z" banner counts, and
+    // both must carry a full three-part version.
     let sample = &entry.response_body[..entry.response_body.len().min(65_536)];
     let body = String::from_utf8_lossy(sample);
-    parse_version(&body).map(|version| {
-        let marker = body
-            .to_ascii_lowercase()
-            .find("php/")
-            .map(|index| audit::preview(&body[index.min(body.len())..], 120))
-            .unwrap_or_default();
-        (version, format!("response body: {marker}"), false)
-    })
+    let lower = body.to_ascii_lowercase();
+    for marker in ["php version ", "php/"] {
+        let mut from = 0;
+        while let Some(position) = lower[from..].find(marker) {
+            let index = from + position;
+            let rest: String = body[index + marker.len()..].chars().take(40).collect();
+            let tail = format!("PHP/{rest}");
+            if let Some(parts) = parse_parts(&tail) {
+                if parts.len() >= 3 {
+                    let version = (parts[0], parts[1], parts[2]);
+                    return Some((version, format!("response body: {}", audit::preview(&tail, 60)), false));
+                }
+            }
+            from = index + marker.len();
+        }
+    }
+    None
+}
+
+/// Distributions (Debian, Ubuntu, RHEL and derivatives) backport security fixes without raising
+/// the upstream version number, so an old-looking banner proves nothing about the fix.
+fn distro_build(headers: &serde_json::Map<String, Value>, source: &str) -> bool {
+    let mut text = source.to_ascii_lowercase();
+    for name in ["server", "x-powered-by", "via"] {
+        if let Some(value) = header_text(headers, name) {
+            text.push(' ');
+            text.push_str(&value.to_ascii_lowercase());
+        }
+    }
+    ["ubuntu", "debian", "+deb", "~deb", "centos", "red hat", "rhel", "fedora", "amzn", "almalinux", "rocky", "suse", "oracle linux", ".el7", ".el8", ".el9", ".el10"]
+        .iter()
+        .any(|marker| text.contains(marker))
 }
 
 pub(super) async fn audit(
@@ -164,6 +196,10 @@ pub(super) async fn audit(
                         .map(version_text)
                         .unwrap_or_else(|| "no fixed release (end-of-life branch)".to_string());
                     let fid = "php2shell-1".to_string();
+                    // Not a proof of the fix status: backports, EOL guesses and body text all weaken it.
+                    let backport = from_header && distro_build(&headers, &source);
+                    let eol_guess = fixed.is_none();
+                    let severity = if backport || !from_header || eol_guess { "high" } else { "critical" };
                     let mut finding = audit::finding(
                         "php2shell",
                         &fid,
@@ -172,14 +208,26 @@ pub(super) async fn audit(
                             "The server disclosed PHP {text} ({source}). That release is before the fixed builds for {ADVISORY}, so the deployment is in the affected range. This is version-based exposure evidence, not a proof of remote code execution: reachability still depends on request processing and on the vulnerable paths actually being used. The audit sent no request and attempted no exploit."
                         ),
                         vec!["observed"],
-                        vec![
-                            source.clone(),
-                            format!("Assessed PHP {text}; fixed release: {fixed_text}"),
-                            format!("Advisory: {ADVISORY}"),
-                        ],
-                        "critical",
+                        {
+                            let mut lines = vec![
+                                source.clone(),
+                                format!("Assessed PHP {text}; fixed release: {fixed_text}"),
+                                format!("Advisory: {ADVISORY}"),
+                            ];
+                            if backport {
+                                lines.push("The server looks like a distribution build (Debian, Ubuntu, RHEL or similar). Distributions backport fixes without changing the PHP version, so this banner may overstate the exposure; compare the package changelog with the advisory.".into());
+                            }
+                            lines
+                        },
+                        severity,
                     );
-                    finding["confidence"] = json!(if from_header { "high" } else { "medium" });
+                    finding["confidence"] = json!(if backport {
+                        "low"
+                    } else if from_header && !eol_guess {
+                        "high"
+                    } else {
+                        "medium"
+                    });
                     finding["verification"] = json!({
                         "method": "Passive comparison of a disclosed PHP version with the advisory fixed releases",
                         "outcome": "inconclusive",
@@ -337,5 +385,35 @@ mod tests {
         let run = audit(&hidden, "php-hidden", &state, &intercept).await.unwrap();
         assert_eq!(run["checks"][0]["status"], "inconclusive");
         assert!(super::super::scan::validate_run("php-hidden", &run).is_ok());
+    }
+
+    #[tokio::test]
+    async fn weak_evidence_is_downgraded_or_ignored() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let storage = proxy_core::TrafficStorage::new(":memory:", 100_000).unwrap();
+        let intercept = Intercept::new(storage.clone());
+        let (state, _runtime) = audit::start(storage.clone(), intercept.clone());
+
+        // Distribution build: the old banner may be backported.
+        let distro = entry(json!({"server":["Apache/2.4.58 (Ubuntu)"],"x-powered-by":["PHP/8.3.6"]}), "");
+        let run = audit(&distro, "php-distro", &state, &intercept).await.unwrap();
+        assert_eq!(run["findings"][0]["confidence"], "low");
+        assert_eq!(run["findings"][0]["severity"], "high");
+
+        // Documentation text about PHP is not disclosure.
+        let prose = entry(
+            json!({"set-cookie":["PHPSESSID=abc"]}),
+            "<p>This plugin requires PHP 7.4 or later; tested up to PHP 8.1.2</p>",
+        );
+        let run = audit(&prose, "php-prose", &state, &intercept).await.unwrap();
+        assert!(run["findings"].as_array().unwrap().is_empty());
+        assert_eq!(run["checks"][0]["status"], "inconclusive");
+
+        // A phpinfo page is.
+        let info = entry(json!({"set-cookie":["PHPSESSID=abc"]}), "<h1>PHP Version 8.4.26</h1>");
+        let run = audit(&info, "php-info", &state, &intercept).await.unwrap();
+        assert_eq!(run["findings"].as_array().unwrap().len(), 1);
+        assert_eq!(run["findings"][0]["confidence"], "medium");
+        assert_eq!(run["findings"][0]["severity"], "high");
     }
 }

@@ -52,6 +52,7 @@ export const commandInjection: ScanCheck = {
   async run(ctx) {
     if (!ready(ctx))
       return result("Stable successful baselines and a selected parameter required.", true);
+    let blocked = false;
     for (const style of ["separator", "substitution"] as const) {
       const rows: Exchange[] = [];
       const markers: string[] = [];
@@ -71,8 +72,11 @@ export const commandInjection: ScanCheck = {
         const probe = await send(ctx, payload, `Command split marker ${i + 1} (${style})`);
         rows.push(control, probe);
         markers.push(marker);
-        if (!success(control) || !success(probe))
-          return result("Command probes failed or were blocked.", true);
+        // A style the application rejects (a filter, a 400, a 500) says nothing about the other style.
+        if (!success(control) || !success(probe)) {
+          blocked = true;
+          break;
+        }
         if (contains(control, marker) || !contains(probe, marker)) break;
       }
       if (
@@ -94,6 +98,7 @@ export const commandInjection: ScanCheck = {
         );
       }
     }
+    if (blocked) return result("Command probes failed or were blocked.", true);
     return result(
       "No constructed output for supported POSIX shell contexts; blind and Windows execution are not assessed.",
     );
@@ -117,6 +122,7 @@ function arithmeticCheck(
     async run(ctx) {
       if (!ready(ctx))
         return result("Stable successful baselines and a selected parameter required.", true);
+      let blocked = false;
       for (const format of formats) {
         const rows: Exchange[] = [];
         const products: string[] = [];
@@ -139,8 +145,11 @@ function arithmeticCheck(
           const probe = await send(ctx, payload, `${format.name} arithmetic ${i + 1}`);
           rows.push(control, probe);
           products.push(product);
-          if (!ok(control) || !success(probe))
-            return result("Arithmetic probes failed or were blocked.", true);
+          // Wrong syntax usually fails (a 400 or 500); the next syntax family may still evaluate.
+          if (!ok(control) || !success(probe)) {
+            blocked = true;
+            break;
+          }
           if (token(control) || !token(probe)) break;
         }
         if (
@@ -169,6 +178,7 @@ function arithmeticCheck(
           );
         }
       }
+      if (blocked) return result("Arithmetic probes failed or were blocked for some syntax families; none evaluated.", true);
       return result("No controlled arithmetic evaluation for supported expression contexts.");
     },
   };
@@ -359,7 +369,7 @@ export const xxe: ScanCheck = {
     const cases = [
       {
         uri: "file:///etc/passwd",
-        signature: /(?:^|\n)root:[^:\r\n]*:0:0:[^\r\n]*:[^:\r\n]*:[^\r\n]+/,
+        signature: /(?:^|[\r\n>"'\s])root:[^:\r\n]*:0:0:[^\r\n]*:[^:\r\n]*:[^\r\n]+/,
       },
       {
         uri: "file:///C:/Windows/win.ini",
@@ -457,11 +467,15 @@ export const commandBypass: ScanCheck = {
       [";$IFS$9id", "IFS with positional"],
       [";echo aWQ=|base64 -d|sh", "base64 pipe"],
     ] as const;
+    let blocked = 0;
     for (const [payload, label] of payloads) {
       const probe = await send(ctx, payload, `Command bypass ${label}`);
       const repeat = await send(ctx, payload, `Command bypass ${label} repeat`);
-      if (!success(probe) || !success(repeat))
-        return result("Command bypass probes failed or were blocked.", true);
+      // The point of this check is a filter that rejects some payloads: keep trying the others.
+      if (!success(probe) || !success(repeat)) {
+        blocked++;
+        continue;
+      }
       if (BENIGN_UID.test(text(probe)) && BENIGN_UID.test(text(repeat))) {
         const original = await ctx.probe(ctx.request, "Command bypass original control");
         if (!restored(ctx, original)) return result("Original response did not restore baseline.", true);
@@ -475,6 +489,7 @@ export const commandBypass: ScanCheck = {
         );
       }
     }
+    if (blocked === payloads.length) return result("Command bypass probes failed or were blocked.", true);
     return result("No uid/gid command output observed for the supported separator and filter evasions.");
   },
 };

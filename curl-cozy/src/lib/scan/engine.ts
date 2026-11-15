@@ -407,6 +407,8 @@ export class ScanEngine {
     businessReadback = false,
     crawlResource = false,
     hostOverride?: { header: "host" | "x-forwarded-host"; host: string },
+    /** The URL-override check reaches a denied path through the origin root, so it may GET "/". */
+    allowRootGet = false,
   ): Promise<Exchange> => {
     if (
       !this.original.allowSending ||
@@ -440,8 +442,10 @@ export class ScanEngine {
               request.body !== "" ||
               (origin.origin !== target.origin && !this.deps.allowScriptOrigin?.(target.href))
             : origin.origin !== target.origin ||
-              origin.pathname !== target.pathname ||
+              (origin.pathname !== target.pathname &&
+                !(allowRootGet && target.pathname === "/" && request.method === "GET" && request.body === "")) ||
               (request.method !== this.original.request.method &&
+                !(allowRootGet && target.pathname === "/" && request.method === "GET") &&
                 !(allowMethodProbe && ["OPTIONS", "TRACE"].includes(request.method)))
     )
       throw Error("Scan probes must stay on the selected endpoint and method.");
@@ -1309,6 +1313,13 @@ export class ScanEngine {
                         "jwt-x5u",
                         "jwt-kid",
                       ].includes(id),
+                      false,
+                      false,
+                      undefined,
+                      false,
+                      false,
+                      undefined,
+                      id === "url-override",
                     )
                 : async () => {
                     throw Error("Passive checks cannot send requests.");

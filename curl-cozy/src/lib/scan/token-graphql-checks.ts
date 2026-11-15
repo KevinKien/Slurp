@@ -208,7 +208,8 @@ export const graphqlFieldSuggestion: ScanCheck = {
       const first = Array.isArray(payload?.errors) ? payload.errors[0] : undefined;
       return typeof first?.message === "string" ? first.message : "";
     };
-    const suggested = (text: string) => /Did you mean|Cannot query field|Unknown field|Field .* not found/i.test(text);
+    // Only an actual suggestion counts: "Cannot query field" is the standard validation error every server returns.
+    const suggested = (text: string) => /Did you mean/i.test(text);
     if (
       suggested(message(a)) &&
       suggested(message(b)) &&

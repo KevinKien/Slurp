@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { CODECS, encode, decode, type CodecId } from "@/lib/codec";
 import { generateUuids, type UuidVersion } from "@/lib/uuid";
+import { React2ShellTool } from "@/components/react2shell-tool";
 import {
   JWT_ALGS,
   decodeJwt,
@@ -334,6 +335,7 @@ export function ToolsView() {
             ["codec", "Encode / Decode"],
             ["uuid", "UUID generator"],
             ["jwt", "JWT"],
+            ["react2shell", "React2Shell lockfile"],
           ].map(([id, label]) => (
             <Button
               key={id}
@@ -347,7 +349,7 @@ export function ToolsView() {
           ))}
         </div>
         <div role="tabpanel">
-          {tab === "codec" ? <CodecTool /> : tab === "uuid" ? <UuidTool /> : <JwtTool />}
+          {tab === "codec" ? <CodecTool /> : tab === "uuid" ? <UuidTool /> : tab === "react2shell" ? <React2ShellTool /> : <JwtTool />}
         </div>
       </div>
     </div>

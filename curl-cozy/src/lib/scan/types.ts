@@ -67,6 +67,7 @@ export type CheckId =
   | "php2shell"
   | "http2shell"
   | "react2shell"
+  | "react2shell-version"
   | "passive-audit"
   | "sql-injection"
   | "ssti"

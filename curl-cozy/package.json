@@ -1,6 +1,7 @@
 {
   "name": "slurp",
   "private": true,
+  "license": "Apache-2.0",
   "sideEffects": false,
   "type": "module",
   "scripts": {
@@ -12,7 +13,8 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "bench:scan": "vitest run --config vitest.bench.config.ts"
   },
   "overrides": {
     "rolldown": "1.2.1"

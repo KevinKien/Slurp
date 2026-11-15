@@ -113,7 +113,7 @@ export const checkRegistry: readonly CheckMetadata[] = [
     "CORS",
     "Stable successful nonempty baselines",
     "Credentialed reflection with two probes, unrelated-origin denial and original restoration; browser review required",
-    "experimental",
+    "implemented",
   ),
   entry(
     "nosql-operators",
@@ -176,7 +176,7 @@ export const checkRegistry: readonly CheckMetadata[] = [
     "JWT",
     "Signed Bearer JWT; successful stable baseline",
     "Repeated invalid/absent signatures and none/None/NONE/nOnE variants, isolated JWT and denied anonymous/malformed controls",
-    "experimental",
+    "implemented",
   ),
   entry(
     "graphql-introspection",
@@ -372,7 +372,7 @@ export const checkRegistry: readonly CheckMetadata[] = [
     "XML",
     "XML Content-Type and body; stable successful baselines",
     "Repeated XML parser errors and controls",
-    "experimental",
+    "implemented",
   ),
   entry(
     "xml-entity-body",
@@ -381,7 +381,7 @@ export const checkRegistry: readonly CheckMetadata[] = [
     "XML",
     "XML Content-Type and body; stable successful baselines",
     "Two bounded internal entities; does not establish XXE",
-    "experimental",
+    "implemented",
   ),
   entry(
     "xxe-body",
@@ -390,7 +390,7 @@ export const checkRegistry: readonly CheckMetadata[] = [
     "XML",
     "XML Content-Type and body; stable successful baselines",
     "Repeated file signatures; escaped and missing-file controls",
-    "experimental",
+    "implemented",
   ),
 
   entry(
@@ -400,7 +400,7 @@ export const checkRegistry: readonly CheckMetadata[] = [
     "Injection",
     "Stable successful baselines; selected parameter; intrusive opt-in",
     "Repeated uid/gid output for separators, newline, IFS, tab, split-command and base64 pipe with a plain control",
-    "experimental",
+    "implemented",
   ),
   entry(
     "argument-injection",
@@ -418,7 +418,7 @@ export const checkRegistry: readonly CheckMetadata[] = [
     "Injection",
     "Selected parameter; stable successful baselines",
     "Two split printf outputs, plain controls and original restore",
-    "experimental",
+    "implemented",
   ),
   entry(
     "code-injection",
@@ -427,7 +427,7 @@ export const checkRegistry: readonly CheckMetadata[] = [
     "Injection",
     "Selected parameter; stable successful baselines",
     "Two products and non-evaluating controls; runtime not proven",
-    "experimental",
+    "implemented",
   ),
   entry(
     "el-injection",
@@ -481,7 +481,7 @@ export const checkRegistry: readonly CheckMetadata[] = [
     "XML",
     "Selected XML-bearing parameter; stable successful baselines",
     "Repeated local-file or remote HTTP entity signatures; escaped and missing-file controls; cloud metadata is never requested automatically",
-    "experimental",
+    "implemented",
   ),
 
   entry(
@@ -491,7 +491,7 @@ export const checkRegistry: readonly CheckMetadata[] = [
     "Injection",
     "Stable successful baselines; selected parameters",
     "Repeated true/false pairs and original controls",
-    "experimental",
+    "implemented",
   ),
   entry(
     "sql-bypass",
@@ -509,7 +509,7 @@ export const checkRegistry: readonly CheckMetadata[] = [
     "Injection",
     "Stable low-jitter baselines; selected parameters; sufficient timeout",
     "Two bounded 2-second delays, zero-delay and original controls",
-    "experimental",
+    "implemented",
   ),
   entry(
     "header-injection",
@@ -545,7 +545,7 @@ export const checkRegistry: readonly CheckMetadata[] = [
     "File access",
     "Captured multipart request with a file part; intrusive opt-in",
     "Repeated acceptance of .php, .php.jpg, .phtml, spoofed Content-Type and GIF magic bytes with a baseline upload",
-    "experimental",
+    "implemented",
   ),
   entry(
     "oauth-redirect",
@@ -591,7 +591,7 @@ export const checkRegistry: readonly CheckMetadata[] = [
     "Routing",
     "Stable baseline; X-Original-URL / X-Rewrite-URL; denied (401/403) for the bypass variant",
     "Current-path, repeated missing-path, denied-path-through-root, root and restored controls",
-    "experimental",
+    "implemented",
   ),
   entry(
     "path-confusion",
@@ -709,7 +709,7 @@ export const checkRegistry: readonly CheckMetadata[] = [
     "Injection",
     "Stable baselines; selected parameters",
     "Repeated SQL errors, quote repair or true/false groups; original controls",
-    "experimental",
+    "implemented",
   ),
   entry(
     "ssti",
@@ -718,7 +718,7 @@ export const checkRegistry: readonly CheckMetadata[] = [
     "Injection",
     "Stable baselines; selected parameters",
     "Marked arithmetic for {{ }}, ${ }, #{ }, <%= %>, *{ } and @( ); invalid-expression controls, engine fingerprint and polyglot parser-error disclosure",
-    "experimental",
+    "implemented",
   ),
   entry(
     "ssti-rce",
@@ -736,7 +736,7 @@ export const checkRegistry: readonly CheckMetadata[] = [
     "File access",
     "Stable baselines; selected parameters",
     "Repeated file signatures and missing-file control",
-    "experimental",
+    "implemented",
   ),
   entry(
     "file-inclusion",
@@ -778,7 +778,7 @@ export const checkRegistry: readonly CheckMetadata[] = [
     "Anonymous API response",
     "medium",
     "Authentication",
-    "New proxy API capture",
+    "New proxy API capture (image/* responses are skipped)",
     "HTTP 200 without common credentials; review required",
     "experimental",
     "automatic",
@@ -865,11 +865,21 @@ export const checkRegistry: readonly CheckMetadata[] = [
   ),
   entry(
     "react2shell",
-    "React2Shell RSC exposure",
+    "React Server Components detection (React2Shell, CVE-2025-55182)",
     "light",
     "Runtime",
-    "New proxy capture of a Next.js or React Server Components response",
-    "Ordinary RSC: 1 navigation request; no Server Function payload; patch level needs a package inventory",
+    "New proxy capture with strong RSC evidence: a Flight response, an App Router page (self.__next_f) or Vary: RSC",
+    "Evidence from the captured response only; Pages Router, x-powered-by and Vercel headers are not RSC evidence; no request is sent",
+    "experimental",
+    "automatic",
+  ),
+  entry(
+    "react2shell-version",
+    "React2Shell patch level (Next.js version, CVE-2025-55182)",
+    "light",
+    "Runtime",
+    "RSC evidence; up to four same-origin /_next/static scripts fetched without cookies or credentials",
+    "Next.js version read from window.next.version and compared with the vendor's patched releases; an unreadable version is informational, never reported as vulnerable; no Flight request or Server Function payload",
     "experimental",
     "automatic",
   ),
