@@ -2,7 +2,7 @@ import { useOptionalScan } from "@/lib/scan-context";
 import { useIntruder } from "@/lib/intruder-context";
 import type { ReactElement } from "react";
 import { Link } from "@tanstack/react-router";
-import { ArrowUpRight, Copy, ScanLine, Trash2 } from "lucide-react";
+import { ArrowUpRight, Braces, Copy, ScanLine, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   ContextMenu,
@@ -16,6 +16,7 @@ import type { HttpRequest } from "@/lib/traffic";
 import { isWebSocketRequest, websocketRequest } from "@/lib/websocket-request";
 import { nextReplayTabId } from "@/lib/replay-tabs";
 import { toCurl } from "@/lib/request-actions";
+import { setGraphqlSeed } from "@/lib/graphql/request";
 
 export function RequestMenu({
   request,
@@ -100,6 +101,26 @@ export function RequestMenu({
         >
           <Copy className="size-4" />
           Copy cURL
+        </ContextMenuItem>
+        <ContextMenuItem asChild disabled={disabled}>
+          <Link
+            to="/graphql"
+            className="gap-2"
+            onClick={(event) => {
+              // The page applies the request when it arrives, even if it is still loading.
+              try {
+                const source = read();
+                if (source instanceof Promise) void source.then(setGraphqlSeed).catch(report);
+                else setGraphqlSeed(source);
+              } catch (error) {
+                event.preventDefault();
+                report(error);
+              }
+            }}
+          >
+            <Braces className="size-4" />
+            Open in GraphQL
+          </Link>
         </ContextMenuItem>
         {intruder && (
           <ContextMenuItem asChild disabled={disabled}>

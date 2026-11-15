@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as DashboardRouteImport } from './routes/dashboard'
 import { Route as FlowsRouteImport } from './routes/flows'
+import { Route as GraphqlRouteImport } from './routes/graphql'
 import { Route as InterceptRouteImport } from './routes/intercept'
 import { Route as IntruderRouteImport } from './routes/intruder'
 import { Route as MatrixRouteImport } from './routes/matrix'
@@ -36,6 +37,11 @@ const DashboardRoute = DashboardRouteImport.update({
 const FlowsRoute = FlowsRouteImport.update({
   id: '/flows',
   path: '/flows',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const GraphqlRoute = GraphqlRouteImport.update({
+  id: '/graphql',
+  path: '/graphql',
   getParentRoute: () => rootRouteImport,
 } as any)
 const InterceptRoute = InterceptRouteImport.update({
@@ -93,6 +99,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/dashboard': typeof DashboardRoute
   '/flows': typeof FlowsRoute
+  '/graphql': typeof GraphqlRoute
   '/intercept': typeof InterceptRoute
   '/intruder': typeof IntruderRoute
   '/matrix': typeof MatrixRoute
@@ -108,6 +115,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/dashboard': typeof DashboardRoute
   '/flows': typeof FlowsRoute
+  '/graphql': typeof GraphqlRoute
   '/intercept': typeof InterceptRoute
   '/intruder': typeof IntruderRoute
   '/matrix': typeof MatrixRoute
@@ -124,6 +132,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/dashboard': typeof DashboardRoute
   '/flows': typeof FlowsRoute
+  '/graphql': typeof GraphqlRoute
   '/intercept': typeof InterceptRoute
   '/intruder': typeof IntruderRoute
   '/matrix': typeof MatrixRoute
@@ -141,6 +150,7 @@ export interface FileRouteTypes {
     | '/'
     | '/dashboard'
     | '/flows'
+    | '/graphql'
     | '/intercept'
     | '/intruder'
     | '/matrix'
@@ -156,6 +166,7 @@ export interface FileRouteTypes {
     | '/'
     | '/dashboard'
     | '/flows'
+    | '/graphql'
     | '/intercept'
     | '/intruder'
     | '/matrix'
@@ -171,6 +182,7 @@ export interface FileRouteTypes {
     | '/'
     | '/dashboard'
     | '/flows'
+    | '/graphql'
     | '/intercept'
     | '/intruder'
     | '/matrix'
@@ -187,6 +199,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   DashboardRoute: typeof DashboardRoute
   FlowsRoute: typeof FlowsRoute
+  GraphqlRoute: typeof GraphqlRoute
   InterceptRoute: typeof InterceptRoute
   IntruderRoute: typeof IntruderRoute
   MatrixRoute: typeof MatrixRoute
@@ -220,6 +233,13 @@ declare module '@tanstack/react-router' {
       path: '/flows'
       fullPath: '/flows'
       preLoaderRoute: typeof FlowsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/graphql': {
+      id: '/graphql'
+      path: '/graphql'
+      fullPath: '/graphql'
+      preLoaderRoute: typeof GraphqlRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/intercept': {
@@ -299,6 +319,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   DashboardRoute: DashboardRoute,
   FlowsRoute: FlowsRoute,
+  GraphqlRoute: GraphqlRoute,
   InterceptRoute: InterceptRoute,
   IntruderRoute: IntruderRoute,
   MatrixRoute: MatrixRoute,

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GraphQL Documentation — Slurp</title><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="stylesheet" href="/docs/theme.css"></head><body>
+<nav aria-label="Documentation"><a href="/docs">← All documentation</a></nav><h1>GraphQL</h1>
+<p>Explore a GraphQL schema, build operations from it and send them. Open <strong>GraphQL</strong> in the sidebar, or right-click a request in HTTP History and choose <strong>Open in GraphQL</strong> to start from a captured request: its endpoint, headers, query, variables and operation name fill the editor. Requests are sent through the same backend as Replay, so the same target restrictions apply (HTTP(S) only, DNS pinning, no automatic redirects, bounded responses and timeouts).</p>
+<h2>Load the schema</h2>
+<p>Enter the endpoint, put any authentication under <strong>Headers</strong> (one <code>Name: value</code> per line) and choose <strong>Load schema</strong>. Slurp sends the standard introspection query and builds the schema explorer from the answer. The schema stays loaded while you move between pages and is not saved to disk.</p>
+<p>When the server has introspection disabled, the error is shown and the editor stays usable. Use <strong>Import schema</strong> to load a schema you saved elsewhere: the JSON result of an introspection query, as <code>{"data":{"__schema":…}}</code>, <code>{"__schema":…}</code> or the <code>__schema</code> object itself. Schema definition language (SDL) files cannot be imported.</p>
+<h2>Schema explorer</h2>
+<ul><li>Tabs list the <strong>queries</strong>, <strong>mutations</strong> and <strong>subscriptions</strong> of the schema, and all <strong>types</strong>.</li>
+<li>Each field shows its arguments, return type, description and deprecation. Type names are links: open an object, interface, input, enum or union to see its fields, values or members, and use <strong>Back</strong> to return.</li>
+<li><strong>Search</strong> matches type, field, argument and enum-value names across the whole schema.</li>
+<li><strong>Copy SDL</strong> copies the loaded schema as schema definition language.</li></ul>
+<h2>Build an operation</h2>
+<p>Choose <strong>Use</strong> beside a root field. Slurp writes a ready-to-send operation: required arguments become variables with sample values (empty strings, zero, the first enum value, input objects with their required fields), optional arguments are left out, and the selection set lists scalar and enum fields plus nested objects two levels deep. A type already on the path is not expanded again, so cycles such as <code>User.friends</code> are cut. Fields that need arguments and deprecated fields are not selected. Unions select <code>__typename</code> and the first six members. Edit the result freely.</p>
+<h2>Edit and send</h2>
+<ul><li>The editor has <strong>Query</strong>, <strong>Variables</strong> (a JSON object) and <strong>Headers</strong> tabs. <strong>Prettify</strong> re-indents the query and the variables. Ctrl/⌘+Enter in the query sends.</li>
+<li>The request is a JSON <code>POST</code> with <code>query</code>, <code>variables</code> and <code>operationName</code>. The operation name is taken from the query when it contains exactly one named operation, or from the field you fill in. <code>Content-Type</code> is set to <code>application/json</code>; <code>Host</code>, <code>Content-Length</code> and similar connection headers are never copied.</li>
+<li>The response shows the status, time and size, the JSON pretty-printed, and any GraphQL <code>errors</code> above it. A second tab shows the response headers.</li>
+<li><strong>Send to Replay</strong> opens the request as a new Replay tab; <strong>Copy cURL</strong> copies it as a command.</li></ul>
+<h2>Limits</h2>
+<p>Requests that arrive as GraphQL over GET, batched arrays or <code>application/graphql</code> bodies can be opened (the first operation is used) but are sent as a single JSON POST. The editor does not validate queries or autocomplete from the schema: the server's own errors are shown. Subscriptions are listed but cannot be run, and file uploads (multipart) are not supported. Security checks for GraphQL (introspection exposure, field suggestions, batching) are described in <a href="/docs/scan.html">Scan dashboard</a>.</p>
+</body></html>
